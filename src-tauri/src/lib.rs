@@ -136,12 +136,20 @@ async fn add_source(
     notebook_id: i64,
     location: String,
 ) -> Result<usize, String> {
-    let notebooks = engine.get()?;
-    blocking(move || {
+    eprintln!("notebook-rs: add_source requested for {location:?}");
+    let notebooks = engine
+        .get()
+        .inspect_err(|message| eprintln!("notebook-rs: refused: {message}"))?;
+    let result = blocking(move || {
         let document = Sources::standard().read(location.trim())?;
         notebooks.add_source(NotebookId(notebook_id), &document.title, &document.text)
     })
-    .await
+    .await;
+    match &result {
+        Ok(count) => eprintln!("notebook-rs: added, {count} passages"),
+        Err(message) => eprintln!("notebook-rs: not added: {message}"),
+    }
+    result
 }
 
 #[tauri::command]

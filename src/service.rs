@@ -17,6 +17,11 @@ use std::sync::Arc;
 
 const PASSAGES_PER_QUESTION: usize = 6;
 
+/// How many passages go to the embedding model in one call. A bound on what is held and
+/// computed at once, so that a long source is indexed in steps. (Measured: the memory of the
+/// model is mostly decided by the model itself, not by this number; see DECISIONS D-14.)
+pub const EMBED_BATCH: usize = 16;
+
 pub struct Notebooks {
     store: Arc<Store>,
     chunker: Box<dyn Chunker>,
@@ -74,7 +79,10 @@ impl Notebooks {
     pub fn add_source(&self, notebook: NotebookId, title: &str, text: &str) -> Result<usize> {
         let chunks = self.chunker.split(text);
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-        let vectors = self.embedder.embed(&texts)?;
+        let mut vectors = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(EMBED_BATCH) {
+            vectors.extend(self.embedder.embed(batch)?);
+        }
         let passages: Vec<NewPassage> = chunks
             .into_iter()
             .zip(vectors)
@@ -258,6 +266,46 @@ mod tests {
             notebooks.add_source(nb, title, text).unwrap();
         }
         (notebooks, nb)
+    }
+
+    /// Remembers how many texts it got in each call.
+    struct BatchSizes(Mutex<Vec<usize>>);
+    impl Embedder for BatchSizes {
+        fn model(&self) -> &str {
+            "batch-sizes"
+        }
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.0.lock().unwrap().push(texts.len());
+            Ok(vec![vec![1.0]; texts.len()])
+        }
+    }
+
+    #[test]
+    fn a_long_source_is_embedded_in_small_batches_and_nothing_is_lost() {
+        let embedder = Arc::new(BatchSizes(Mutex::new(Vec::new())));
+        let notebooks = Notebooks::standard(
+            Store::in_memory().unwrap(),
+            embedder.clone(),
+            Box::new(Recording {
+                reply: "{}",
+                prompts: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let nb = notebooks.notebook("n").unwrap();
+        // 70 paragraphs of 600 characters: two never fit one passage, so 70 passages.
+        let text: Vec<String> = (0..70)
+            .map(|i| format!("{i} {}", "слово ".repeat(100)))
+            .collect();
+
+        let count = notebooks
+            .add_source(nb, "книга.txt", &text.join("\n\n"))
+            .unwrap();
+
+        assert_eq!(count, 70);
+        let sizes = embedder.0.lock().unwrap().clone();
+        assert!(sizes.iter().all(|size| *size <= EMBED_BATCH), "{sizes:?}");
+        assert_eq!(sizes.iter().sum::<usize>(), 70);
+        assert_eq!(notebooks.sources(nb).unwrap()[0].passages, 70);
     }
 
     #[test]

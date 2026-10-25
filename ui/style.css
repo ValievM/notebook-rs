@@ -71,7 +71,8 @@ input[type="text"], input[type="url"], textarea {
 textarea { resize: none; }
 
 .muted, .hint { color: var(--muted); }
-.hint { font-size: 12px; min-height: 18px; }
+.hint { font-size: 12px; min-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.hint.error { color: var(--danger); }
 
 /* Layout: notebooks | sources | chat, and the source viewer over the chat. */
 .app {

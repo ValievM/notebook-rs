@@ -25,7 +25,7 @@ chunk::Chunker     embed::Embedder          retrieve::Retriever ──► answer
 | `view` | `source_view`: источник для чтения с отмеченной цитатой (`before` / `hit` / `after`). Место цитаты находит `answer::locate` по той же нормализации, по которой цитата проверяется. |
 | `source` | Трейт `Reader` (читает один вид источника), цепочка `Sources`; `WebReader`, `PdfReader`, `TextReader`. Выход читателя это недоверенный текст. |
 | `embed` | Трейт `Embedder` (`embed` для фрагментов, `embed_query` для вопроса), `HashingEmbedder` (офлайн), `cosine`. Вектор помечен именем модели. |
-| `embed_fast` | `FastEmbedder` (fastembed, E5), только с `--features fastembed`. |
+| `embed_fast` | `FastEmbedder` (fastembed, E5-small multilingual, 8-битная квантованная версия, 113 МБ): файлы скачиваются один раз (`Fetch`, запись через `.part`), каждый текст считается отдельно. Только с `--features fastembed`. |
 | `store` | Репозиторий над SQLite: FTS5 (BM25) и векторы (BLOB). Единственное место с SQL, миграции через `user_version`. |
 | `retrieve` | Трейт `Retriever`; `Bm25Retriever`, `VectorRetriever`, `HybridRetriever` + `reciprocal_rank_fusion`. |
 | `parallel` | `map_ordered`: fork-join на `thread::scope`; `testing::Rendezvous` для тестов. См. раздел «Параллелизм». |

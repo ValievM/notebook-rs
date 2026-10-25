@@ -32,6 +32,7 @@ const state = {
   sources: [],
   selected: new Set(),
   working: 0,
+  ready: false,
 };
 
 /** Builds an element. Strings become text nodes; there is no way to pass HTML. */
@@ -78,7 +79,7 @@ function banner(message, kind = 'info') {
 /** Marks that something is being done: buttons wait, and the work shows in the dialog. */
 function working(delta) {
   state.working += delta;
-  const busy = state.working > 0;
+  const busy = state.working > 0 || !state.ready;
   for (const id of ['send', 'summarize', 'compare', 'pick-files']) $(id).disabled = busy;
   if (!busy) renderSelection();
 }
@@ -181,7 +182,7 @@ function sourceItem(source) {
 
 function renderSelection() {
   const count = state.selected.size;
-  const busy = state.working > 0;
+  const busy = state.working > 0 || !state.ready;
   const hasNotebook = state.current !== null && state.sources.length > 0;
   $('summarize').textContent = count === 1 ? 'Конспект источника' : 'Конспект блокнота';
   $('summarize').disabled = busy || !hasNotebook || count > 1;
@@ -193,20 +194,43 @@ function renderSelection() {
     : 'Для конспекта оставьте один источник или снимите выбор, для сравнения нужно ровно два.';
 }
 
+function sourceStatus(message, isError = false) {
+  const node = $('source-status');
+  node.textContent = message;
+  node.classList.toggle('error', isError);
+}
+
 async function addLocations(locations) {
-  if (state.current === null) { toast('Сначала создайте блокнот.', 'error'); return; }
+  if (!state.ready) {
+    sourceStatus('Поиск ещё готовится, подождите несколько секунд и повторите.', true);
+    return;
+  }
+  if (state.working > 0) {
+    sourceStatus('Подождите: ещё идёт предыдущая операция.', true);
+    return;
+  }
+  if (state.current === null) {
+    sourceStatus('Сначала выберите или создайте блокнот слева.', true);
+    toast('Сначала выберите или создайте блокнот слева.', 'error');
+    return;
+  }
   working(1);
+  const failures = [];
   try {
     for (const location of locations) {
       const name = location.split(/[\\/]/).pop();
-      $('source-status').textContent = `Добавляю «${name}»…`;
+      sourceStatus(`Добавляю «${name}»…`);
       try {
         const count = await api.invoke('add_source', { notebookId: state.current, location });
         toast(`«${name}»: добавлено, ${count} фрагм.`);
-      } catch (error) { toast(String(error), 'error'); }
+      } catch (error) {
+        failures.push(`«${name}»: ${error}`);
+        toast(String(error), 'error');
+      }
     }
   } finally {
-    $('source-status').textContent = '';
+    // An error stays on screen until the next attempt: a toast is gone in seconds.
+    sourceStatus(failures.join('\n'), failures.length > 0);
     working(-1);
   }
   await loadSources();
@@ -231,7 +255,10 @@ api.onDrop?.((payload) => {
   const drop = $('drop');
   if (payload.type === 'enter' || payload.type === 'over') drop.classList.add('over');
   else drop.classList.remove('over');
-  if (payload.type === 'drop' && payload.paths?.length) addLocations(payload.paths);
+  if (payload.type === 'drop') {
+    if (payload.paths?.length) addLocations(payload.paths);
+    else sourceStatus('Окно получило перетаскивание, но без путей к файлам.', true);
+  }
 });
 
 // ---------- dialog ----------
@@ -274,7 +301,7 @@ async function runTask(kind, waiting, command, args) {
 $('composer').addEventListener('submit', async (event) => {
   event.preventDefault();
   const question = $('question').value.trim();
-  if (!question || state.working > 0) return;
+  if (!question || state.working > 0 || !state.ready) return;
   if (state.current === null) { toast('Сначала создайте блокнот.', 'error'); return; }
   $('question').value = '';
   addMessage(h('div', { class: 'message user' }, question));
@@ -384,7 +411,7 @@ document.addEventListener('keydown', (event) => { if (event.key === 'Escape') cl
 // ---------- start ----------
 
 async function start() {
-  renderSelection();
+  working(0); // buttons wait until the engine is ready
   renderEmptyDialog();
   for (;;) {
     const status = await api.invoke('status');
@@ -394,6 +421,8 @@ async function start() {
     await new Promise((resolve) => setTimeout(resolve, 700));
   }
   banner('');
+  state.ready = true;
+  working(0);
   await loadNotebooks();
 }
 
