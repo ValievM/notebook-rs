@@ -26,9 +26,10 @@ chunk::Chunker     embed::Embedder          retrieve::Retriever ──► answer
 | `embed_fast` | `FastEmbedder` (fastembed, E5), только с `--features fastembed`. |
 | `store` | Репозиторий над SQLite: FTS5 (BM25) и векторы (BLOB). Единственное место с SQL, миграции через `user_version`. |
 | `retrieve` | Трейт `Retriever`; `Bm25Retriever`, `VectorRetriever`, `HybridRetriever` + `reciprocal_rank_fusion`. |
+| `deep` | Режим `--deep`: план поисков от модели (`parse_plan`), поиски, слияние RRF, один ответ. Принимает `&dyn Llm` и `&dyn Retriever`, поэтому тестируется на фейках. |
 | `answer` | Промпт с пронумерованными фрагментами, разбор JSON, проверка цитат подстрокой. |
 | `llm` | Трейт `Llm`; адаптер `CodexExec`. |
-| `service` | Фасад `Notebooks`: `add_source`, `ask`; `standard()` собирает обычную связку. |
+| `service` | Фасад `Notebooks`: `add_source`, `ask`, `ask_deep`; `standard()` собирает обычную связку. |
 
 ## Паттерны (и где они)
 - **Порт и адаптер (hexagonal)**: `Llm`, `Embedder`, `Store` (репозиторий). Ядро не знает, что за ним `codex` или SQLite.

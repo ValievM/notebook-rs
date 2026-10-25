@@ -39,6 +39,11 @@ struct ReplyCitation {
 }
 
 pub fn prompt(question: &str, passages: &[Passage]) -> String {
+    prompt_guided(question, &[], passages)
+}
+
+/// Like `prompt`, with notes on what to look for (the instructions of a deep search plan).
+pub fn prompt_guided(question: &str, guidance: &[String], passages: &[Passage]) -> String {
     let mut text = String::from(
         "Отвечай только по приведённым фрагментам источников. Если ответа в них нет, так и скажи.\n\
          Ответь JSON-объектом без пояснений вокруг: {\"answer\": \"...\", \"citations\": [{\"n\": 1, \"quote\": \"дословная цитата из фрагмента\"}]}.\n\
@@ -52,11 +57,27 @@ pub fn prompt(question: &str, passages: &[Passage]) -> String {
             passage.text
         ));
     }
+    if !guidance.is_empty() {
+        text.push_str("Что нужно найти и учесть в ответе:\n");
+        for note in guidance {
+            text.push_str(&format!("- {note}\n"));
+        }
+        text.push('\n');
+    }
     text.push_str(&format!("Вопрос: {question}\n"));
     text
 }
 
 pub fn ask(llm: &dyn Llm, question: &str, passages: &[Passage]) -> Result<Answer> {
+    ask_guided(llm, question, &[], passages)
+}
+
+pub fn ask_guided(
+    llm: &dyn Llm,
+    question: &str,
+    guidance: &[String],
+    passages: &[Passage],
+) -> Result<Answer> {
     if passages.is_empty() {
         return Ok(Answer {
             text: "В источниках ничего не нашлось по этому вопросу.".into(),
@@ -64,7 +85,10 @@ pub fn ask(llm: &dyn Llm, question: &str, passages: &[Passage]) -> Result<Answer
             rejected_quotes: 0,
         });
     }
-    parse(&llm.complete(&prompt(question, passages))?, passages)
+    parse(
+        &llm.complete(&prompt_guided(question, guidance, passages))?,
+        passages,
+    )
 }
 
 pub fn parse(raw: &str, passages: &[Passage]) -> Result<Answer> {

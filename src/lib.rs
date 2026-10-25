@@ -1,6 +1,7 @@
 pub mod answer;
 pub mod chunk;
 pub mod chunk_markdown;
+pub mod deep;
 pub mod domain;
 pub mod embed;
 #[cfg(feature = "fastembed")]

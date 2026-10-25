@@ -61,7 +61,14 @@ enum Command {
     /// Add a text or markdown file as a source (the same title replaces the old one).
     Add { notebook: String, file: PathBuf },
     /// Ask a question; the answer uses only this notebook's sources.
-    Ask { notebook: String, question: String },
+    Ask {
+        notebook: String,
+        question: String,
+        /// Plan several searches first (two model calls instead of one): for comparisons and
+        /// questions with several parts.
+        #[arg(long)]
+        deep: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -93,9 +100,17 @@ fn main() -> Result<()> {
             let count = notebooks.add_source(id, &title, &text)?;
             println!("«{title}» добавлен в «{notebook}»: {count} фрагментов.");
         }
-        Command::Ask { notebook, question } => {
+        Command::Ask {
+            notebook,
+            question,
+            deep,
+        } => {
             let id = notebooks.notebook(&notebook)?;
-            let reply = notebooks.ask(id, &question)?;
+            let reply = if deep {
+                notebooks.ask_deep(id, &question)?
+            } else {
+                notebooks.ask(id, &question)?
+            };
             println!("{}\n", reply.text);
             for citation in &reply.citations {
                 println!(
