@@ -10,6 +10,12 @@ pub enum Error {
     BadReply(String),
     #[error("cannot read the source: {0}")]
     Source(String),
+    #[error("too much text for one request: {0}")]
+    TooLarge(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Usage(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

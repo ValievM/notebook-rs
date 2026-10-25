@@ -240,7 +240,10 @@ mod tests {
         let answer = research(&llm, &retriever, NB, "Срок и оплата?").unwrap();
 
         assert_eq!(llm.calls(), 2);
-        assert_eq!(retriever.asked(), vec!["срок договора", "оплата"]);
+        // The searches run at the same time, so the order in which they arrive is not defined.
+        let mut asked = retriever.asked();
+        asked.sort();
+        assert_eq!(asked, vec!["оплата", "срок договора"]);
         let synthesis = llm.prompt(1);
         assert!(synthesis.contains("Срок действия договора"));
         assert!(synthesis.contains("Оплата производится"));

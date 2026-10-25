@@ -29,9 +29,10 @@ chunk::Chunker     embed::Embedder          retrieve::Retriever ──► answer
 | `retrieve` | Трейт `Retriever`; `Bm25Retriever`, `VectorRetriever`, `HybridRetriever` + `reciprocal_rank_fusion`. |
 | `parallel` | `map_ordered`: fork-join на `thread::scope`; `testing::Rendezvous` для тестов. См. раздел «Параллелизм». |
 | `deep` | Режим `--deep`: план поисков от модели (`parse_plan`), поиски, слияние RRF, один ответ. Принимает `&dyn Llm` и `&dyn Retriever`, поэтому тестируется на фейках. |
+| `digest` | Надстройки над целыми источниками: `summarize` (конспект) и `compare` (сравнение двух источников). Помещается в бюджет: один вызов; длиннее: части параллельно, затем сводка по проверенным цитатам. |
 | `answer` | Промпт с пронумерованными фрагментами, разбор JSON, проверка цитат подстрокой. |
 | `llm` | Трейт `Llm`; адаптер `CodexExec`. |
-| `service` | Фасад `Notebooks`: `add_source`, `ask`, `ask_deep`; `standard()` собирает обычную связку. |
+| `service` | Фасад `Notebooks`: `add_source`, `ask`, `ask_deep`, `summarize`, `compare`; `standard()` собирает обычную связку. |
 
 ## Паттерны (и где они)
 - **Порт и адаптер (hexagonal)**: `Llm`, `Embedder`, `Store` (репозиторий). Ядро не знает, что за ним `codex` или SQLite.
@@ -58,6 +59,7 @@ chunk::Chunker     embed::Embedder          retrieve::Retriever ──► answer
 | `Store.db` | `Mutex<Connection>` | Соединение SQLite обслуживает один запрос за раз; писатель не должен перемешиваться с читателем. Мьютекс, а не `RwLock`: читать из одного соединения параллельно всё равно нельзя. |
 | `Store.vectors` | `RwLock<VectorCache>` + `Arc` | Кэш читает каждый вопрос, сбрасывает только запись: много читателей сразу, редкий писатель. Значения в `Arc`, поэтому читатель получает ссылку, а не копию тысяч векторов. |
 | `VectorCache.generation` | счётчик под тем же `RwLock` | Защита от гонки «загрузил до записи, положил после сброса»: кэш принимает загруженное только если поколение не изменилось. Проверено детерминированным тестом через шов `embedded_passages_with`. |
+| `CodexExec` (папка вызова) | `AtomicU64` + `Ordering::Relaxed` | Каждый вызов `codex exec` получает свою временную папку (`pid-счётчик`): вызовы идут параллельно, общий файл ответа перемешал бы их. Важна только уникальность значения, а не порядок между потоками, поэтому достаточно `Relaxed`. Проверено тестом с поддельным `codex`, который «думает» 0,3 с. |
 | `FastEmbedder.model` | `Mutex<TextEmbedding>` | `embed` берёт `&mut self`; нужен эксклюзивный доступ. Внутри ONNX Runtime сам использует все ядра, так что параллельные вызовы снаружи ничего бы не ускорили. |
 
 Правила:

@@ -13,6 +13,9 @@ cargo test
 cargo run -- add Аренда договор.txt
 cargo run -- add Аренда скан-с-текстом.pdf
 cargo run -- add Аренда https://example.com/page
+cargo run -- ask --deep Аренда "Срок, оплата и условия выезда?"
+cargo run -- summarize Аренда
+cargo run -- compare Аренда договор.txt памятка.pdf
 cargo run -- ask Аренда "За сколько дней предупредить о расторжении?"
 ```
 

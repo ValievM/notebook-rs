@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use notebook_rs::{
+    answer::Answer,
+    digest::Budget,
     embed::{Embedder, HashingEmbedder},
     llm::CodexExec,
     service::Notebooks,
@@ -23,6 +25,10 @@ struct Cli {
     /// another: after switching, add the sources again.
     #[arg(long, global = true, value_enum, default_value_t = EmbedderKind::default_kind())]
     embedder: EmbedderKind,
+    /// How many characters of sources one model call may get in `summarize` and `compare`;
+    /// longer material is cut into parts that are summarized at the same time and merged.
+    #[arg(long, global = true)]
+    max_chars: Option<usize>,
     #[command(subcommand)]
     command: Command,
 }
@@ -71,6 +77,19 @@ enum Command {
         #[arg(long)]
         deep: bool,
     },
+    /// A summary of one source (`--source <title>`) or of the whole notebook.
+    Summarize {
+        notebook: String,
+        /// The title of one source; without it every source of the notebook is summarized.
+        #[arg(long)]
+        source: Option<String>,
+    },
+    /// What two sources have in common, how they differ and where they contradict.
+    Compare {
+        notebook: String,
+        first: String,
+        second: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -85,11 +104,17 @@ fn main() -> Result<()> {
         }
     };
     let embedder = embedder(cli.embedder, &path)?;
-    let notebooks = Notebooks::standard(
+    let mut notebooks = Notebooks::standard(
         Store::open(&path)?,
         embedder,
         Box::new(CodexExec::default()),
     );
+    if let Some(chars_per_call) = cli.max_chars {
+        notebooks = notebooks.with_budget(Budget {
+            chars_per_call,
+            ..Budget::default()
+        });
+    }
     match cli.command {
         Command::Add { notebook, location } => {
             let id = notebooks.notebook(&notebook)?;
@@ -111,20 +136,37 @@ fn main() -> Result<()> {
             } else {
                 notebooks.ask(id, &question)?
             };
-            println!("{}\n", reply.text);
-            for citation in &reply.citations {
-                println!(
-                    "  [{}] {} — «{}»",
-                    citation.n, citation.source_title, citation.quote
-                );
-            }
-            if reply.rejected_quotes > 0 {
-                println!(
-                    "\n(отброшено цитат, которых нет в источниках: {})",
-                    reply.rejected_quotes
-                );
-            }
+            print_answer(&reply);
+        }
+        Command::Summarize { notebook, source } => {
+            let id = notebooks.notebook(&notebook)?;
+            print_answer(&notebooks.summarize(id, source.as_deref())?);
+        }
+        Command::Compare {
+            notebook,
+            first,
+            second,
+        } => {
+            let id = notebooks.notebook(&notebook)?;
+            print_answer(&notebooks.compare(id, &first, &second)?);
         }
     }
     Ok(())
+}
+
+/// The answer, then the citations that were found in the sources, then how many were not.
+fn print_answer(reply: &Answer) {
+    println!("{}\n", reply.text);
+    for citation in &reply.citations {
+        println!(
+            "  [{}] {} — «{}»",
+            citation.n, citation.source_title, citation.quote
+        );
+    }
+    if reply.rejected_quotes > 0 {
+        println!(
+            "\n(отброшено цитат, которых нет в источниках: {})",
+            reply.rejected_quotes
+        );
+    }
 }

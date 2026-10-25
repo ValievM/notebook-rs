@@ -165,6 +165,33 @@ impl Store {
         )? as usize)
     }
 
+    /// Titles of the notebook's sources, in the order they were added.
+    pub fn source_titles(&self, notebook: NotebookId) -> Result<Vec<String>> {
+        let db = self.db();
+        let mut statement =
+            db.prepare("SELECT title FROM source WHERE notebook_id = ?1 ORDER BY id")?;
+        let rows = statement.query_map([notebook.0], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The passages of one source (or of every source if `title` is `None`) in reading order:
+    /// sources in the order they were added, passages by position.
+    pub fn source_passages(
+        &self,
+        notebook: NotebookId,
+        title: Option<&str>,
+    ) -> Result<Vec<Passage>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT p.id, s.title, p.ordinal, p.text
+             FROM passage p JOIN source s ON s.id = p.source_id
+             WHERE s.notebook_id = ?1 AND (?2 IS NULL OR s.title = ?2)
+             ORDER BY s.id, p.ordinal",
+        )?;
+        let rows = statement.query_map(params![notebook.0, title], passage_from_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// Passages matching an FTS5 query, best first. Only this notebook is searched.
     pub fn search_text(
         &self,
@@ -349,6 +376,64 @@ mod tests {
         let found = store.embedded_passages(nb, "model-a").unwrap();
         assert_eq!(found[0].1, vec![0.25, -1.5]);
         assert!(store.embedded_passages(nb, "model-b").unwrap().is_empty());
+    }
+
+    fn notebook_with_two_sources() -> (Store, NotebookId) {
+        let store = Store::in_memory().unwrap();
+        let nb = store.create_notebook("n").unwrap();
+        store
+            .add_source(
+                nb,
+                "a.txt",
+                &[passage(0, "a-ноль", None), passage(1, "a-один", None)],
+                "m",
+            )
+            .unwrap();
+        store
+            .add_source(nb, "b.txt", &[passage(0, "b-ноль", None)], "m")
+            .unwrap();
+        (store, nb)
+    }
+
+    #[test]
+    fn lists_source_titles_in_the_order_they_were_added() {
+        let (store, nb) = notebook_with_two_sources();
+        assert_eq!(store.source_titles(nb).unwrap(), vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn passages_of_all_sources_come_in_reading_order() {
+        let (store, nb) = notebook_with_two_sources();
+        let texts: Vec<String> = store
+            .source_passages(nb, None)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.text)
+            .collect();
+        assert_eq!(texts, vec!["a-ноль", "a-один", "b-ноль"]);
+    }
+
+    #[test]
+    fn passages_of_one_source_are_only_its_own() {
+        let (store, nb) = notebook_with_two_sources();
+        let found = store.source_passages(nb, Some("b.txt")).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source_title, "b.txt");
+        assert!(
+            store
+                .source_passages(nb, Some("нет.txt"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn another_notebook_has_its_own_sources() {
+        let (store, nb) = notebook_with_two_sources();
+        let other = store.create_notebook("other").unwrap();
+        assert!(store.source_titles(other).unwrap().is_empty());
+        assert!(store.source_passages(other, None).unwrap().is_empty());
+        assert_eq!(store.source_passages(nb, None).unwrap().len(), 3);
     }
 
     fn with_vector(title: &str, store: &Store, nb: NotebookId) {

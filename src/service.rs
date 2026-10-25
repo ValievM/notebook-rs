@@ -5,9 +5,10 @@ use crate::answer::{self, Answer};
 use crate::chunk::Chunker;
 use crate::chunk_markdown::MarkdownChunker;
 use crate::deep;
-use crate::domain::NotebookId;
+use crate::digest::{self, Budget};
+use crate::domain::{NotebookId, Passage};
 use crate::embed::Embedder;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::llm::Llm;
 use crate::retrieve::{Bm25Retriever, HybridRetriever, Retriever, VectorRetriever};
 use crate::store::{NewPassage, Store};
@@ -21,6 +22,7 @@ pub struct Notebooks {
     embedder: Arc<dyn Embedder>,
     retriever: Box<dyn Retriever>,
     llm: Box<dyn Llm>,
+    budget: Budget,
 }
 
 impl Notebooks {
@@ -37,7 +39,14 @@ impl Notebooks {
             embedder,
             retriever,
             llm,
+            budget: Budget::default(),
         }
+    }
+
+    /// Changes how much text one model call may get in `summarize` and `compare`.
+    pub fn with_budget(mut self, budget: Budget) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// The usual wiring: Markdown-aware chunks (plain text works too), BM25 and vectors fused.
@@ -83,6 +92,39 @@ impl Notebooks {
             .retriever
             .retrieve(notebook, question, PASSAGES_PER_QUESTION)?;
         answer::ask(self.llm.as_ref(), question, &passages)
+    }
+
+    /// The passages of a source (or of the whole notebook) in reading order; an unknown title is
+    /// an error that lists the titles there are.
+    fn passages_of(&self, notebook: NotebookId, title: Option<&str>) -> Result<Vec<Passage>> {
+        if let Some(wanted) = title {
+            let titles = self.store.source_titles(notebook)?;
+            if !titles.iter().any(|known| known == wanted) {
+                return Err(Error::NotFound(format!(
+                    "no source «{wanted}» in the notebook; there are: {}",
+                    titles.join(", ")
+                )));
+            }
+        }
+        self.store.source_passages(notebook, title)
+    }
+
+    /// A summary of one source, or of the whole notebook when `source` is `None`.
+    pub fn summarize(&self, notebook: NotebookId, source: Option<&str>) -> Result<Answer> {
+        let passages = self.passages_of(notebook, source)?;
+        digest::summarize(self.llm.as_ref(), &passages, &self.budget)
+    }
+
+    /// What two sources of the notebook have in common, how they differ, where they contradict.
+    pub fn compare(&self, notebook: NotebookId, first: &str, second: &str) -> Result<Answer> {
+        if first == second {
+            return Err(Error::Usage(
+                "choose two different sources to compare".into(),
+            ));
+        }
+        let first = self.passages_of(notebook, Some(first))?;
+        let second = self.passages_of(notebook, Some(second))?;
+        digest::compare(self.llm.as_ref(), &first, &second, &self.budget)
     }
 
     /// For questions that need several searches (comparisons, "and also..."): the model plans the
@@ -165,6 +207,86 @@ mod tests {
             }
             .to_string())
         }
+    }
+
+    fn notebook_with_three_sources(prompts: &Arc<Mutex<Vec<String>>>) -> (Notebooks, NotebookId) {
+        let llm = Recording {
+            reply: r#"{"answer":"ок"}"#,
+            prompts: prompts.clone(),
+        };
+        let notebooks = Notebooks::standard(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(llm),
+        );
+        let nb = notebooks.notebook("Диплом").unwrap();
+        for (title, text) in [
+            ("договор.txt", "Срок действия договора два года."),
+            ("памятка.txt", "О выезде предупредить за тридцать дней."),
+            ("заметки.txt", "Купить молоко и хлеб."),
+        ] {
+            notebooks.add_source(nb, title, text).unwrap();
+        }
+        (notebooks, nb)
+    }
+
+    #[test]
+    fn a_summary_of_the_notebook_reads_every_source_in_order() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = notebook_with_three_sources(&prompts);
+        notebooks.summarize(nb, None).unwrap();
+        let prompt = prompts.lock().unwrap()[0].clone();
+        assert!(prompt.contains("Задание: Составь конспект"));
+        let at = |needle: &str| prompt.find(needle).unwrap();
+        assert!(at("договор.txt") < at("памятка.txt") && at("памятка.txt") < at("заметки.txt"));
+    }
+
+    #[test]
+    fn a_summary_of_one_source_uses_only_that_source() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = notebook_with_three_sources(&prompts);
+        notebooks.summarize(nb, Some("памятка.txt")).unwrap();
+        let prompt = prompts.lock().unwrap()[0].clone();
+        assert!(prompt.contains("тридцать дней"));
+        assert!(!prompt.contains("договора") && !prompt.contains("молоко"));
+    }
+
+    #[test]
+    fn an_unknown_source_is_not_found_and_the_error_lists_the_sources() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = notebook_with_three_sources(&prompts);
+        let error = notebooks.summarize(nb, Some("нет.txt")).unwrap_err();
+        assert!(matches!(error, crate::error::Error::NotFound(_)));
+        let message = error.to_string();
+        assert!(
+            message.contains("нет.txt") && message.contains("договор.txt"),
+            "{message}"
+        );
+        assert!(prompts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_comparison_uses_exactly_the_two_chosen_sources() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = notebook_with_three_sources(&prompts);
+        notebooks.compare(nb, "договор.txt", "памятка.txt").unwrap();
+        let prompt = prompts.lock().unwrap()[0].clone();
+        assert!(prompt.contains("Сравни источники «договор.txt» и «памятка.txt»"));
+        assert!(prompt.contains("два года") && prompt.contains("тридцать дней"));
+        assert!(!prompt.contains("молоко"));
+    }
+
+    #[test]
+    fn comparing_asks_for_two_different_sources_that_exist() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = notebook_with_three_sources(&prompts);
+        let same = notebooks
+            .compare(nb, "договор.txt", "договор.txt")
+            .unwrap_err();
+        assert!(matches!(same, crate::error::Error::Usage(_)));
+        let missing = notebooks.compare(nb, "договор.txt", "нет.txt").unwrap_err();
+        assert!(matches!(missing, crate::error::Error::NotFound(_)));
+        assert!(prompts.lock().unwrap().is_empty());
     }
 
     #[test]

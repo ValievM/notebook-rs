@@ -38,34 +38,96 @@ struct ReplyCitation {
     quote: String,
 }
 
+/// A passage together with the number the model sees it under. Numbers need not start at 1 or
+/// be consecutive: parts of a long source keep their position in the whole (see `digest`).
+#[derive(Debug, Clone, Copy)]
+pub struct Numbered<'a> {
+    pub n: usize,
+    pub passage: &'a Passage,
+}
+
+/// The passages numbered 1, 2, 3... in the order given.
+pub fn number_from_one(passages: &[Passage]) -> Vec<Numbered<'_>> {
+    passages
+        .iter()
+        .enumerate()
+        .map(|(i, passage)| Numbered { n: i + 1, passage })
+        .collect()
+}
+
+/// A prompt for a task other than a question ("make a summary", "compare"), over numbered passages.
+pub fn task_prompt(task: &str, passages: &[Numbered]) -> String {
+    render(passages, &format!("Задание: {task}\n"))
+}
+
+/// Asks the model to do the task; the citations in the reply are checked against `passages`.
+pub fn ask_task(llm: &dyn Llm, task: &str, passages: &[Numbered]) -> Result<Answer> {
+    parse_numbered(&llm.complete(&task_prompt(task, passages))?, passages)
+}
+
+/// Like `parse`, for passages that carry their own numbers.
+pub fn parse_numbered(raw: &str, passages: &[Numbered]) -> Result<Answer> {
+    let no_json = || Error::BadReply("no JSON object in the reply".into());
+    let start = raw.find('{').ok_or_else(no_json)?;
+    let end = raw.rfind('}').ok_or_else(no_json)?;
+    let reply: Reply =
+        serde_json::from_str(&raw[start..=end]).map_err(|e| Error::BadReply(e.to_string()))?;
+    let mut citations = Vec::new();
+    let mut rejected_quotes = 0;
+    for cited in reply.citations {
+        let passage = passages.iter().find(|numbered| numbered.n == cited.n);
+        match passage {
+            Some(found) if contains_quote(&found.passage.text, &cited.quote) => {
+                citations.push(Citation {
+                    n: cited.n,
+                    source_title: found.passage.source_title.clone(),
+                    quote: cited.quote,
+                })
+            }
+            _ => rejected_quotes += 1,
+        }
+    }
+    Ok(Answer {
+        text: reply.answer,
+        citations,
+        rejected_quotes,
+    })
+}
+
+/// The instructions about the reply format, the numbered passages, then `tail` (the question
+/// or the task).
+fn render(passages: &[Numbered], tail: &str) -> String {
+    let mut text = String::from(
+        "Отвечай только по приведённым фрагментам источников. Если ответа в них нет, так и скажи.\n\
+         Ответь JSON-объектом без пояснений вокруг: {\"answer\": \"...\", \"citations\": [{\"n\": 1, \"quote\": \"дословная цитата из фрагмента\"}]}.\n\
+         В answer ссылайся на фрагменты как [1], [2]. В quote копируй слова фрагмента дословно.\n\n",
+    );
+    for numbered in passages {
+        text.push_str(&format!(
+            "[{}] Источник «{}»:\n{}\n\n",
+            numbered.n, numbered.passage.source_title, numbered.passage.text
+        ));
+    }
+    text.push_str(tail);
+    text
+}
+
 pub fn prompt(question: &str, passages: &[Passage]) -> String {
     prompt_guided(question, &[], passages)
 }
 
 /// Like `prompt`, with notes on what to look for (the instructions of a deep search plan).
 pub fn prompt_guided(question: &str, guidance: &[String], passages: &[Passage]) -> String {
-    let mut text = String::from(
-        "Отвечай только по приведённым фрагментам источников. Если ответа в них нет, так и скажи.\n\
-         Ответь JSON-объектом без пояснений вокруг: {\"answer\": \"...\", \"citations\": [{\"n\": 1, \"quote\": \"дословная цитата из фрагмента\"}]}.\n\
-         В answer ссылайся на фрагменты как [1], [2]. В quote копируй слова фрагмента дословно.\n\n",
-    );
-    for (i, passage) in passages.iter().enumerate() {
-        text.push_str(&format!(
-            "[{}] Источник «{}»:\n{}\n\n",
-            i + 1,
-            passage.source_title,
-            passage.text
-        ));
-    }
+    let mut tail = String::new();
     if !guidance.is_empty() {
-        text.push_str("Что нужно найти и учесть в ответе:\n");
+        tail.push_str("Что нужно найти и учесть в ответе:\n");
         for note in guidance {
-            text.push_str(&format!("- {note}\n"));
+            tail.push_str(&format!("- {note}\n"));
         }
-        text.push('\n');
+        tail.push('\n');
     }
-    text.push_str(&format!("Вопрос: {question}\n"));
-    text
+    tail.push_str(&format!("Вопрос: {question}\n"));
+    render(&number_from_one(passages), &tail)
 }
 
 pub fn ask(llm: &dyn Llm, question: &str, passages: &[Passage]) -> Result<Answer> {
@@ -92,29 +154,7 @@ pub fn ask_guided(
 }
 
 pub fn parse(raw: &str, passages: &[Passage]) -> Result<Answer> {
-    let no_json = || Error::BadReply("no JSON object in the reply".into());
-    let start = raw.find('{').ok_or_else(no_json)?;
-    let end = raw.rfind('}').ok_or_else(no_json)?;
-    let reply: Reply =
-        serde_json::from_str(&raw[start..=end]).map_err(|e| Error::BadReply(e.to_string()))?;
-    let mut citations = Vec::new();
-    let mut rejected_quotes = 0;
-    for cited in reply.citations {
-        let passage = cited.n.checked_sub(1).and_then(|i| passages.get(i));
-        match passage {
-            Some(p) if contains_quote(&p.text, &cited.quote) => citations.push(Citation {
-                n: cited.n,
-                source_title: p.source_title.clone(),
-                quote: cited.quote,
-            }),
-            _ => rejected_quotes += 1,
-        }
-    }
-    Ok(Answer {
-        text: reply.answer,
-        citations,
-        rejected_quotes,
-    })
+    parse_numbered(raw, &number_from_one(passages))
 }
 
 fn normalize(text: &str) -> String {
@@ -156,6 +196,50 @@ mod tests {
                 text: "Позвонить научному руководителю.".into(),
             },
         ]
+    }
+
+    fn passage_text(source: &str, text: &str) -> Passage {
+        Passage {
+            id: PassageId(0),
+            source_title: source.into(),
+            ordinal: 0,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn a_task_prompt_shows_the_numbers_it_was_given_and_the_task() {
+        let a = passage_text("договор.txt", "Срок два года.");
+        let b = passage_text("заметки.txt", "Позвонить руководителю.");
+        let prompt = task_prompt(
+            "Составь конспект.",
+            &[
+                Numbered { n: 7, passage: &a },
+                Numbered { n: 12, passage: &b },
+            ],
+        );
+        assert!(prompt.contains("[7] Источник «договор.txt»"));
+        assert!(prompt.contains("[12] Источник «заметки.txt»"));
+        assert!(prompt.contains("Задание: Составь конспект."));
+    }
+
+    #[test]
+    fn citations_are_checked_against_the_passage_with_that_number() {
+        let a = passage_text("договор.txt", "Срок действия договора два года.");
+        let b = passage_text("заметки.txt", "Позвонить научному руководителю.");
+        let numbered = [
+            Numbered { n: 7, passage: &a },
+            Numbered { n: 12, passage: &b },
+        ];
+        let reply = r#"{"answer":"ок","citations":[
+            {"n":7,"quote":"договора два года"},
+            {"n":12,"quote":"научному руководителю"},
+            {"n":12,"quote":"два года"},
+            {"n":1,"quote":"договора два года"}]}"#;
+        let answer = parse_numbered(reply, &numbered).unwrap();
+        let kept: Vec<usize> = answer.citations.iter().map(|c| c.n).collect();
+        assert_eq!(kept, vec![7, 12]);
+        assert_eq!(answer.rejected_quotes, 2);
     }
 
     #[test]
