@@ -10,6 +10,7 @@ use crate::domain::{NotebookId, Passage};
 use crate::embed::Embedder;
 use crate::error::{Error, Result};
 use crate::llm::Llm;
+use crate::metrics::{InstrumentedEmbedder, InstrumentedLlm, InstrumentedRetriever, Metrics};
 use crate::retrieve::{Bm25Retriever, HybridRetriever, Retriever, VectorRetriever};
 use crate::store::{NewPassage, NotebookInfo, SourceInfo, Store};
 use crate::view::{PassageView, source_view};
@@ -29,6 +30,7 @@ pub struct Notebooks {
     retriever: Box<dyn Retriever>,
     llm: Box<dyn Llm>,
     budget: Budget,
+    metrics: Metrics,
 }
 
 impl Notebooks {
@@ -46,7 +48,15 @@ impl Notebooks {
             retriever,
             llm,
             budget: Budget::default(),
+            metrics: Metrics::off(),
         }
+    }
+
+    /// Measures the operations of the facade itself (`ask`, `source.add`...). To measure the
+    /// model, the embedder and the searches as well, build with `standard_with_metrics`.
+    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Changes how much text one model call may get in `summarize` and `compare`.
@@ -57,18 +67,39 @@ impl Notebooks {
 
     /// The usual wiring: Markdown-aware chunks (plain text works too), BM25 and vectors fused.
     pub fn standard(store: Store, embedder: Arc<dyn Embedder>, llm: Box<dyn Llm>) -> Self {
+        Self::standard_with_metrics(store, embedder, llm, Metrics::off())
+    }
+
+    /// The usual wiring with everything measured: the facade, the model, the embedder, and
+    /// each of the searches (see `metrics`).
+    pub fn standard_with_metrics(
+        store: Store,
+        embedder: Arc<dyn Embedder>,
+        llm: Box<dyn Llm>,
+        metrics: Metrics,
+    ) -> Self {
         let store = Arc::new(store);
-        let retriever = HybridRetriever::new(vec![
-            Box::new(Bm25Retriever::new(store.clone())),
-            Box::new(VectorRetriever::new(store.clone(), embedder.clone())),
+        let embedder: Arc<dyn Embedder> =
+            Arc::new(InstrumentedEmbedder::new(embedder, metrics.clone()));
+        let llm = Box::new(InstrumentedLlm::new(llm, metrics.clone()));
+        let measured = |retriever: Box<dyn Retriever>, kind: &str| -> Box<dyn Retriever> {
+            Box::new(InstrumentedRetriever::new(retriever, metrics.clone(), kind))
+        };
+        let hybrid = HybridRetriever::new(vec![
+            measured(Box::new(Bm25Retriever::new(store.clone())), "retrieve.bm25"),
+            measured(
+                Box::new(VectorRetriever::new(store.clone(), embedder.clone())),
+                "retrieve.vector",
+            ),
         ]);
         Self::new(
             store,
             Box::new(MarkdownChunker::default()),
             embedder,
-            Box::new(retriever),
+            measured(Box::new(hybrid), "retrieve.hybrid"),
             llm,
         )
+        .with_metrics(metrics)
     }
 
     pub fn notebook(&self, name: &str) -> Result<NotebookId> {
@@ -77,30 +108,59 @@ impl Notebooks {
 
     /// Splits, embeds and stores a source; returns how many passages it became.
     pub fn add_source(&self, notebook: NotebookId, title: &str, text: &str) -> Result<usize> {
-        let chunks = self.chunker.split(text);
-        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-        let mut vectors = Vec::with_capacity(texts.len());
-        for batch in texts.chunks(EMBED_BATCH) {
-            vectors.extend(self.embedder.embed(batch)?);
-        }
-        let passages: Vec<NewPassage> = chunks
-            .into_iter()
-            .zip(vectors)
-            .map(|(chunk, vector)| NewPassage {
-                ordinal: chunk.ordinal,
-                text: chunk.text,
-                embedding: Some(vector),
+        self.metrics
+            .span("source.add")
+            .subject(title)
+            .field("chars", text.chars().count() as i64)
+            .run(|span| {
+                let chunks = self
+                    .metrics
+                    .span("source.chunk")
+                    .subject(title)
+                    .run(|step| {
+                        let chunks = self.chunker.split(text);
+                        step.set("passages", chunks.len() as i64);
+                        Ok(chunks)
+                    })?;
+                let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+                let mut vectors = Vec::with_capacity(texts.len());
+                for batch in texts.chunks(EMBED_BATCH) {
+                    vectors.extend(self.embedder.embed(batch)?);
+                }
+                let passages: Vec<NewPassage> = chunks
+                    .into_iter()
+                    .zip(vectors)
+                    .map(|(chunk, vector)| NewPassage {
+                        ordinal: chunk.ordinal,
+                        text: chunk.text,
+                        embedding: Some(vector),
+                    })
+                    .collect();
+                let count = self
+                    .metrics
+                    .span("store.write")
+                    .subject(title)
+                    .field("passages", passages.len() as i64)
+                    .run(|_| {
+                        self.store
+                            .add_source(notebook, title, &passages, self.embedder.model())
+                    })?;
+                span.set("passages", count as i64);
+                self.metrics.sample_memory("after_add");
+                Ok(count)
             })
-            .collect();
-        self.store
-            .add_source(notebook, title, &passages, self.embedder.model())
     }
 
     pub fn ask(&self, notebook: NotebookId, question: &str) -> Result<Answer> {
-        let passages = self
-            .retriever
-            .retrieve(notebook, question, PASSAGES_PER_QUESTION)?;
-        answer::ask(self.llm.as_ref(), question, &passages)
+        self.metrics
+            .span("ask")
+            .field("question_chars", question.chars().count() as i64)
+            .run(|_| {
+                let passages =
+                    self.retriever
+                        .retrieve(notebook, question, PASSAGES_PER_QUESTION)?;
+                answer::ask(self.llm.as_ref(), question, &passages)
+            })
     }
 
     /// The passages of a source (or of the whole notebook) in reading order; an unknown title is
@@ -149,31 +209,46 @@ impl Notebooks {
 
     /// A summary of one source, or of the whole notebook when `source` is `None`.
     pub fn summarize(&self, notebook: NotebookId, source: Option<&str>) -> Result<Answer> {
-        let passages = self.passages_of(notebook, source)?;
-        digest::summarize(self.llm.as_ref(), &passages, &self.budget)
+        self.metrics
+            .span("summarize")
+            .subject(source.unwrap_or("*"))
+            .run(|_| {
+                let passages = self.passages_of(notebook, source)?;
+                digest::summarize(self.llm.as_ref(), &passages, &self.budget)
+            })
     }
 
     /// What two sources of the notebook have in common, how they differ, where they contradict.
     pub fn compare(&self, notebook: NotebookId, first: &str, second: &str) -> Result<Answer> {
-        if first == second {
-            return Err(Error::Usage(
-                "choose two different sources to compare".into(),
-            ));
-        }
-        let first = self.passages_of(notebook, Some(first))?;
-        let second = self.passages_of(notebook, Some(second))?;
-        digest::compare(self.llm.as_ref(), &first, &second, &self.budget)
+        self.metrics
+            .span("compare")
+            .subject(&format!("{first} + {second}"))
+            .run(|_| {
+                if first == second {
+                    return Err(Error::Usage(
+                        "choose two different sources to compare".into(),
+                    ));
+                }
+                let first = self.passages_of(notebook, Some(first))?;
+                let second = self.passages_of(notebook, Some(second))?;
+                digest::compare(self.llm.as_ref(), &first, &second, &self.budget)
+            })
     }
 
     /// For questions that need several searches (comparisons, "and also..."): the model plans the
     /// searches first, so this takes two model calls instead of one.
     pub fn ask_deep(&self, notebook: NotebookId, question: &str) -> Result<Answer> {
-        deep::research(
-            self.llm.as_ref(),
-            self.retriever.as_ref(),
-            notebook,
-            question,
-        )
+        self.metrics
+            .span("ask_deep")
+            .field("question_chars", question.chars().count() as i64)
+            .run(|_| {
+                deep::research(
+                    self.llm.as_ref(),
+                    self.retriever.as_ref(),
+                    notebook,
+                    question,
+                )
+            })
     }
 }
 
@@ -278,6 +353,162 @@ mod tests {
             self.0.lock().unwrap().push(texts.len());
             Ok(vec![vec![1.0]; texts.len()])
         }
+    }
+
+    use crate::metrics::{Event, ManualClock, MemoryRecorder};
+
+    struct Failing;
+    impl Llm for Failing {
+        fn complete(&self, _prompt: &str) -> Result<String> {
+            Err(Error::ModelUnavailable("codex exited with status 1".into()))
+        }
+    }
+
+    fn measured(llm: Box<dyn Llm>) -> (Notebooks, Arc<MemoryRecorder>, NotebookId) {
+        let recorder = Arc::new(MemoryRecorder::default());
+        let metrics = Metrics::with_clock(recorder.clone(), Arc::new(ManualClock::starting_at(1)))
+            .with_memory_probe(|| Some(777));
+        let notebooks = Notebooks::standard_with_metrics(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            llm,
+            metrics,
+        );
+        let nb = notebooks.notebook("n").unwrap();
+        notebooks
+            .add_source(
+                nb,
+                "договор.txt",
+                "Срок действия договора составляет два года.",
+            )
+            .unwrap();
+        notebooks
+            .add_source(nb, "памятка.txt", "О выезде предупредить за тридцать дней.")
+            .unwrap();
+        recorder.events(); // the set-up is not what the test looks at
+        (notebooks, recorder, nb)
+    }
+
+    fn reply() -> Box<dyn Llm> {
+        Box::new(Recording {
+            reply: r#"{"answer":"ок"}"#,
+            prompts: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    fn kinds(events: &[Event]) -> Vec<String> {
+        let mut kinds: Vec<String> = events.iter().map(|e| e.kind.clone()).collect();
+        kinds.sort();
+        kinds.dedup();
+        kinds
+    }
+
+    fn events_after(recorder: &MemoryRecorder, skip: usize) -> Vec<Event> {
+        recorder.events().into_iter().skip(skip).collect()
+    }
+
+    #[test]
+    fn a_question_is_measured_end_to_end_and_at_every_step() {
+        let (notebooks, recorder, nb) = measured(reply());
+        let before = recorder.events().len();
+
+        notebooks.ask(nb, "Какой срок договора?").unwrap();
+
+        let events = events_after(&recorder, before);
+        assert_eq!(
+            kinds(&events),
+            [
+                "ask",
+                "embed.query",
+                "llm.complete",
+                "retrieve.bm25",
+                "retrieve.hybrid",
+                "retrieve.vector"
+            ]
+        );
+        let ask = events.iter().find(|e| e.kind == "ask").unwrap();
+        assert!(ask.fields.contains(&("question_chars".to_string(), 20)));
+    }
+
+    #[test]
+    fn adding_a_source_is_measured_by_its_name_with_its_steps_and_the_memory_after() {
+        let (notebooks, recorder, nb) = measured(reply());
+        let before = recorder.events().len();
+
+        notebooks
+            .add_source(nb, "новый.md", "# Раздел\n\nТекст источника.")
+            .unwrap();
+
+        let events = events_after(&recorder, before);
+        assert_eq!(
+            kinds(&events),
+            [
+                "embed.passages",
+                "memory.after_add",
+                "source.add",
+                "source.chunk",
+                "store.write"
+            ]
+        );
+        let add = events.iter().find(|e| e.kind == "source.add").unwrap();
+        assert_eq!(add.subject.as_deref(), Some("новый.md"));
+        assert!(add.fields.contains(&("passages".to_string(), 1)));
+        // "# Раздел" (8) + two line breaks (2) + "Текст источника." (16)
+        assert!(add.fields.contains(&("chars".to_string(), 26)));
+        let memory = events
+            .iter()
+            .find(|e| e.kind == "memory.after_add")
+            .unwrap();
+        assert_eq!(memory.fields, vec![("rss_bytes".to_string(), 777)]);
+    }
+
+    #[test]
+    fn a_failed_question_is_recorded_with_the_error_at_each_level() {
+        let (notebooks, recorder, nb) = measured(Box::new(Failing));
+        let before = recorder.events().len();
+
+        assert!(notebooks.ask(nb, "вопрос про срок").is_err());
+
+        let events = events_after(&recorder, before);
+        for kind in ["ask", "llm.complete"] {
+            let event = events.iter().find(|e| e.kind == kind).unwrap();
+            assert!(!event.ok, "{kind}");
+            assert_eq!(event.error.as_deref(), Some("model_unavailable"));
+        }
+        let ask = events.iter().find(|e| e.kind == "ask").unwrap();
+        assert!(ask.detail.as_deref().unwrap().contains("codex exited"));
+    }
+
+    #[test]
+    fn a_missing_source_is_recorded_with_its_name() {
+        let (notebooks, recorder, nb) = measured(reply());
+        let before = recorder.events().len();
+
+        assert!(notebooks.summarize(nb, Some("нет.txt")).is_err());
+
+        let events = events_after(&recorder, before);
+        let event = events.iter().find(|e| e.kind == "summarize").unwrap();
+        assert!(!event.ok);
+        assert_eq!(event.subject.as_deref(), Some("нет.txt"));
+        assert_eq!(event.error.as_deref(), Some("not_found"));
+    }
+
+    #[test]
+    fn a_summary_of_the_whole_notebook_and_a_comparison_are_measured_by_what_they_were_about() {
+        let (notebooks, recorder, nb) = measured(reply());
+        let before = recorder.events().len();
+
+        notebooks.summarize(nb, None).unwrap();
+        notebooks.compare(nb, "договор.txt", "памятка.txt").unwrap();
+
+        let events = events_after(&recorder, before);
+        let summarize = events.iter().find(|e| e.kind == "summarize").unwrap();
+        assert_eq!(summarize.subject.as_deref(), Some("*"));
+        let compare = events.iter().find(|e| e.kind == "compare").unwrap();
+        assert_eq!(
+            compare.subject.as_deref(),
+            Some("договор.txt + памятка.txt")
+        );
     }
 
     #[test]

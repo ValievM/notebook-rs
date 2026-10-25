@@ -17,6 +17,7 @@
         <input id="new-notebook-name" type="text" placeholder="Новый блокнот" aria-label="Название нового блокнота" autocomplete="off">
         <button type="submit" class="icon" aria-label="Создать блокнот">+</button>
       </form>
+      <button id="open-metrics" type="button" class="quiet">Метрики</button>
     </aside>
 
     <section class="sources" aria-label="Источники">
@@ -58,6 +59,22 @@
       <div id="viewer-body" class="viewer-body"></div>
     </aside>
   </div>
+
+  <aside id="metrics" class="viewer wide" hidden aria-label="Метрики">
+    <header>
+      <h2>Метрики</h2>
+      <div class="metrics-controls">
+        <select id="metrics-hours" aria-label="Период">
+          <option value="1">за час</option>
+          <option value="24" selected>за сутки</option>
+          <option value="168">за неделю</option>
+        </select>
+        <button id="metrics-refresh" type="button">Обновить</button>
+        <button id="metrics-close" type="button" class="icon" aria-label="Закрыть метрики">×</button>
+      </div>
+    </header>
+    <div id="metrics-body" class="viewer-body"></div>
+  </aside>
 
   <div id="toast" class="toast" role="alert" hidden></div>
   <script type="module" src="app.js"></script>

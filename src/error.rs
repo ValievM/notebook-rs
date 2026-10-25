@@ -20,4 +20,21 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+impl Error {
+    /// The kind of the error as a short stable word, for metrics: the message can hold paths
+    /// and addresses, the kind never does.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Error::Storage(_) => "storage",
+            Error::ModelUnavailable(_) => "model_unavailable",
+            Error::BadReply(_) => "bad_reply",
+            Error::Source(_) => "source",
+            Error::TooLarge(_) => "too_large",
+            Error::NotFound(_) => "not_found",
+            Error::Usage(_) => "usage",
+            Error::Io(_) => "io",
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

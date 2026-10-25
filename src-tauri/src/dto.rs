@@ -3,6 +3,7 @@
 
 use notebook_rs::answer::{Answer, Citation};
 use notebook_rs::error::Error;
+use notebook_rs::metrics::Summary;
 use notebook_rs::store::{NotebookInfo, SourceInfo};
 use notebook_rs::view::PassageView;
 use serde::Serialize;
@@ -103,6 +104,111 @@ impl From<PassageView> for PassageViewDto {
             before: view.before,
             hit: view.hit,
             after: view.after,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KindStatsDto {
+    pub kind: String,
+    pub count: u64,
+    pub errors: u64,
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub max_ms: Option<f64>,
+    pub total_ms: f64,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryDto {
+    pub label: String,
+    pub last_mb: f64,
+    pub max_mb: f64,
+    pub samples: u64,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FailureDto {
+    pub at_ms: i64,
+    pub kind: String,
+    pub subject: Option<String>,
+    pub error: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SlowDto {
+    pub at_ms: i64,
+    pub kind: String,
+    pub subject: Option<String>,
+    pub ms: f64,
+}
+
+/// The metrics as the panel of the window shows them: times in milliseconds, memory in megabytes.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryDto {
+    pub now_ms: i64,
+    pub kinds: Vec<KindStatsDto>,
+    pub memory: Vec<MemoryDto>,
+    pub failures: Vec<FailureDto>,
+    pub slowest: Vec<SlowDto>,
+}
+
+impl SummaryDto {
+    pub fn from_summary(summary: Summary, now_ms: i64) -> Self {
+        let ms = |micros: u64| micros as f64 / 1000.0;
+        let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+        Self {
+            now_ms,
+            kinds: summary
+                .kinds
+                .into_iter()
+                .map(|k| KindStatsDto {
+                    kind: k.kind,
+                    count: k.count,
+                    errors: k.errors,
+                    p50_ms: k.p50_micros.map(ms),
+                    p95_ms: k.p95_micros.map(ms),
+                    max_ms: k.max_micros.map(ms),
+                    total_ms: ms(k.total_micros),
+                })
+                .collect(),
+            memory: summary
+                .memory
+                .into_iter()
+                .map(|m| MemoryDto {
+                    label: m.label,
+                    last_mb: mb(m.last_bytes),
+                    max_mb: mb(m.max_bytes),
+                    samples: m.samples,
+                })
+                .collect(),
+            failures: summary
+                .failures
+                .into_iter()
+                .map(|f| FailureDto {
+                    at_ms: f.at_ms,
+                    kind: f.kind,
+                    subject: f.subject,
+                    error: f.error,
+                    detail: f.detail,
+                })
+                .collect(),
+            slowest: summary
+                .slowest
+                .into_iter()
+                .map(|s| SlowDto {
+                    at_ms: s.at_ms,
+                    kind: s.kind,
+                    subject: s.subject,
+                    ms: ms(s.micros),
+                })
+                .collect(),
         }
     }
 }
@@ -216,6 +322,67 @@ mod tests {
                 "not Russian: {message}"
             );
         }
+    }
+
+    #[test]
+    fn the_metrics_reach_the_page_in_milliseconds_and_megabytes() {
+        use notebook_rs::metrics::sqlite::{FailureRow, KindStats, MemoryStats, SlowRow};
+        let summary = Summary {
+            since_ms: 0,
+            kinds: vec![
+                KindStats {
+                    kind: "llm.complete".into(),
+                    count: 3,
+                    errors: 1,
+                    p50_micros: Some(8_200_000),
+                    p95_micros: Some(14_000_000),
+                    max_micros: Some(15_100_000),
+                    total_micros: 30_000_000,
+                },
+                KindStats {
+                    kind: "no.durations".into(),
+                    count: 1,
+                    errors: 0,
+                    p50_micros: None,
+                    p95_micros: None,
+                    max_micros: None,
+                    total_micros: 0,
+                },
+            ],
+            memory: vec![MemoryStats {
+                label: "after_start".into(),
+                last_bytes: 1_048_576 * 960,
+                max_bytes: 1_048_576 * 1100,
+                samples: 3,
+            }],
+            failures: vec![FailureRow {
+                at_ms: 5,
+                kind: "source.read".into(),
+                subject: Some("scan.pdf".into()),
+                error: "source".into(),
+                detail: "no text layer".into(),
+            }],
+            slowest: vec![SlowRow {
+                at_ms: 7,
+                kind: "llm.complete".into(),
+                subject: None,
+                micros: 15_100_000,
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_value(SummaryDto::from_summary(summary, 99)).unwrap(),
+            json!({
+                "nowMs": 99,
+                "kinds": [
+                    {"kind": "llm.complete", "count": 3, "errors": 1, "p50Ms": 8200.0, "p95Ms": 14000.0, "maxMs": 15100.0, "totalMs": 30000.0},
+                    {"kind": "no.durations", "count": 1, "errors": 0, "p50Ms": null, "p95Ms": null, "maxMs": null, "totalMs": 0.0}
+                ],
+                "memory": [{"label": "after_start", "lastMb": 960.0, "maxMb": 1100.0, "samples": 3}],
+                "failures": [{"atMs": 5, "kind": "source.read", "subject": "scan.pdf", "error": "source", "detail": "no text layer"}],
+                "slowest": [{"atMs": 7, "kind": "llm.complete", "subject": null, "ms": 15100.0}]
+            })
+        );
     }
 
     #[test]

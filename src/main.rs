@@ -5,6 +5,7 @@ use notebook_rs::{
     digest::Budget,
     embed::{Embedder, HashingEmbedder},
     llm::CodexExec,
+    metrics::{Clock, Metrics, RETENTION_DAYS, SqliteRecorder, SystemClock, report, summarize},
     service::Notebooks,
     source::Sources,
     store::Store,
@@ -29,6 +30,9 @@ struct Cli {
     /// longer material is cut into parts that are summarized at the same time and merged.
     #[arg(long, global = true)]
     max_chars: Option<usize>,
+    /// Do not record durations and memory (they go to metrics.db next to the notebooks).
+    #[arg(long, global = true)]
+    no_metrics: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -90,6 +94,12 @@ enum Command {
         first: String,
         second: String,
     },
+    /// How long things took, how often they failed, how much memory the program held.
+    Stats {
+        /// How far back to look.
+        #[arg(long, default_value_t = 24)]
+        hours: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -103,11 +113,33 @@ fn main() -> Result<()> {
             directory.join("notebooks.db")
         }
     };
-    let embedder = embedder(cli.embedder, &path)?;
-    let mut notebooks = Notebooks::standard(
+    let metrics_path = path.with_file_name("metrics.db");
+    let clock = SystemClock::default();
+    if let Command::Stats { hours } = cli.command {
+        return print_stats(&metrics_path, hours, clock.wall_ms());
+    }
+    // Kept in this scope: dropping it at the end of `main` writes what is still waiting.
+    let recorder = (!cli.no_metrics)
+        .then(|| SqliteRecorder::open(&metrics_path, RETENTION_DAYS, clock.wall_ms()))
+        .and_then(|opened| {
+            opened
+                .inspect_err(|error| eprintln!("metrics are off: {error}"))
+                .ok()
+        })
+        .map(Arc::new);
+    let metrics = recorder
+        .clone()
+        .map_or_else(Metrics::off, |r| Metrics::new(r));
+    let embedder = metrics.span("engine.model_load").run(|_| {
+        embedder(cli.embedder, &path)
+            .map_err(|e| notebook_rs::error::Error::ModelUnavailable(e.to_string()))
+    })?;
+    metrics.sample_memory("after_model_load");
+    let mut notebooks = Notebooks::standard_with_metrics(
         Store::open(&path)?,
         embedder,
         Box::new(CodexExec::default()),
+        metrics.clone(),
     );
     if let Some(chars_per_call) = cli.max_chars {
         notebooks = notebooks.with_budget(Budget {
@@ -118,7 +150,9 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Add { notebook, location } => {
             let id = notebooks.notebook(&notebook)?;
-            let document = Sources::standard().read(&location)?;
+            let document = Sources::standard()
+                .with_metrics(metrics.clone())
+                .read(&location)?;
             let count = notebooks.add_source(id, &document.title, &document.text)?;
             println!(
                 "«{}» добавлен в «{notebook}»: {count} фрагментов.",
@@ -150,6 +184,7 @@ fn main() -> Result<()> {
             let id = notebooks.notebook(&notebook)?;
             print_answer(&notebooks.compare(id, &first, &second)?);
         }
+        Command::Stats { .. } => unreachable!("handled before the notebooks are opened"),
     }
     Ok(())
 }
@@ -169,4 +204,18 @@ fn print_answer(reply: &Answer) {
             reply.rejected_quotes
         );
     }
+}
+
+fn print_stats(path: &std::path::Path, hours: u64, now_ms: i64) -> Result<()> {
+    if !path.exists() {
+        println!(
+            "Метрик ещё нет: они появятся после первой операции ({}).",
+            path.display()
+        );
+        return Ok(());
+    }
+    let summary = summarize(path, now_ms - (hours as i64) * 3_600_000)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    print!("{}", report::render(&summary, hours, now_ms));
+    Ok(())
 }

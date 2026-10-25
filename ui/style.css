@@ -237,3 +237,21 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1
 @media (max-width: 1080px) {
   .app { grid-template-columns: 180px 280px minmax(0, 1fr); }
 }
+
+/* Metrics panel */
+button.quiet { border-color: transparent; background: transparent; color: var(--muted); text-align: left; }
+button.quiet:hover:not(:disabled) { color: var(--ink); border-color: var(--line); }
+.viewer.wide { width: min(760px, 96vw); }
+.metrics-controls { display: flex; align-items: center; gap: 8px; }
+select { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 8px; font: inherit; color: inherit; }
+.metrics-body h3, .viewer-body h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 18px 0 6px; }
+table.metrics { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+table.metrics th, table.metrics td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.metrics th:first-child, table.metrics td:first-child { text-align: left; white-space: normal; }
+table.metrics th { color: var(--muted); font-weight: 600; }
+table.metrics small { display: block; color: var(--muted); }
+table.metrics .bad, .bad { color: var(--danger); font-weight: 600; }
+ul.events { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: 13px; }
+ul.events li { overflow-wrap: anywhere; }
+ul.events .when { color: var(--muted); }
+ul.events .detail { display: block; color: var(--muted); }

@@ -51,6 +51,32 @@ export const api = {
       case 'delete_source':
         data.sources = data.sources.filter((s) => s.title !== args.title);
         return null;
+      case 'metrics_summary': {
+        const now = Date.now();
+        return {
+          nowMs: now,
+          kinds: [
+            { kind: 'llm.complete', count: 14, errors: 1, p50Ms: 8200, p95Ms: 14000, maxMs: 15100, totalMs: 120000 },
+            { kind: 'command.ask', count: 9, errors: 0, p50Ms: 9100, p95Ms: 14800, maxMs: 15200, totalMs: 90000 },
+            { kind: 'embed.passages', count: 27, errors: 0, p50Ms: 1900, p95Ms: 3400, maxMs: 3900, totalMs: 52000 },
+            { kind: 'source.read', count: 6, errors: 2, p50Ms: 40, p95Ms: 620, maxMs: 700, totalMs: 1100 },
+            { kind: 'embed.query', count: 9, errors: 0, p50Ms: 38, p95Ms: 61, maxMs: 70, totalMs: 330 },
+            { kind: 'retrieve.bm25', count: 9, errors: 0, p50Ms: 0.8, p95Ms: 1.2, maxMs: 1.4, totalMs: 7 },
+          ],
+          memory: [
+            { label: 'after_start', lastMb: 960, maxMb: 1100, samples: 4 },
+            { label: 'after_add', lastMb: 1710, maxMb: 1830, samples: 6 },
+          ],
+          failures: [
+            { atMs: now - 300000, kind: 'source.read', subject: '/Users/me/Загрузки/скан.pdf', error: 'source', detail: 'cannot read the source: скан.pdf: the PDF has no text layer (a scan needs OCR first)' },
+            { atMs: now - 7200000, kind: 'llm.complete', subject: null, error: 'model_unavailable', detail: 'the model is unavailable: codex exited with status 1' },
+          ],
+          slowest: [
+            { atMs: now - 600000, kind: 'llm.complete', subject: null, ms: 15100 },
+            { atMs: now - 900000, kind: 'command.add_source', subject: 'книга.pdf', ms: 58500 },
+          ],
+        };
+      }
       case 'ask': return structuredClone(answer);
       case 'summarize': return { ...structuredClone(answer), text: 'Договор аренды > Срок\n- Два года с даты подписания [1]\nДоговор аренды > Оплата\n- Ежемесячно до десятого числа [2]' };
       case 'compare': return { ...structuredClone(answer), text: 'Общее: оба источника говорят о выезде за тридцать дней [3].\nРазличия: договор задаёт срок и оплату [1][2].\nПротиворечия: нет.' };

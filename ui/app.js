@@ -406,7 +406,116 @@ async function openSource(title, ordinal = null, quote = null) {
 
 function closeViewer() { $('viewer').hidden = true; }
 $('viewer-close').addEventListener('click', closeViewer);
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeViewer(); });
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') { closeViewer(); closeMetrics(); }
+});
+
+// ---------- metrics ----------
+
+const KIND_LABELS = {
+  ask: 'вопрос целиком',
+  ask_deep: 'глубокий вопрос',
+  summarize: 'конспект',
+  compare: 'сравнение',
+  'llm.complete': 'вызов модели',
+  'embed.query': 'вектор вопроса',
+  'embed.passages': 'векторы фрагментов',
+  'retrieve.hybrid': 'поиск (общий)',
+  'retrieve.bm25': 'поиск по словам',
+  'retrieve.vector': 'поиск по смыслу',
+  'source.read': 'чтение источника',
+  'source.chunk': 'нарезка',
+  'source.add': 'добавление источника',
+  'store.write': 'запись в базу',
+  'engine.start': 'запуск движка',
+  'engine.model_load': 'загрузка модели',
+  'command.ask': 'окно: вопрос',
+  'command.ask_deep': 'окно: глубокий вопрос',
+  'command.add_source': 'окно: добавить источник',
+  'command.summarize': 'окно: конспект',
+  'command.compare': 'окно: сравнение',
+  'command.delete_source': 'окно: удалить источник',
+  'command.create_notebook': 'окно: новый блокнот',
+  'command.source_view': 'окно: открыть источник',
+};
+
+function formatMs(ms) {
+  if (ms === null || ms === undefined) return '—';
+  if (ms < 1) return `${ms.toFixed(1)} мс`;
+  if (ms < 1000) return `${Math.floor(ms)} мс`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)} с`;
+  return `${Math.floor(ms / 60000)} мин ${Math.floor((ms % 60000) / 1000)} с`;
+}
+
+function formatMb(mb) {
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} ГБ` : `${Math.round(mb)} МБ`;
+}
+
+function formatAgo(ms) {
+  if (ms < 60000) return 'только что';
+  if (ms < 3600000) return `${Math.floor(ms / 60000)} мин назад`;
+  if (ms < 86400000) return `${Math.floor(ms / 3600000)} ч назад`;
+  return `${Math.floor(ms / 86400000)} дн назад`;
+}
+
+function renderMetrics(summary) {
+  const body = $('metrics-body');
+  const nothing = !summary.kinds.length && !summary.memory.length && !summary.failures.length;
+  if (nothing) {
+    body.replaceChildren(h('p', { class: 'hint' }, 'Пока ничего не записано за этот период.'));
+    return;
+  }
+  const cell = (value, bad = false) => h('td', bad ? { class: 'bad' } : {}, value);
+  const operations = h('table', { class: 'metrics' },
+    h('thead', {}, h('tr', {}, ['Операция', 'Раз', 'Ошибок', 'Медиана', '95%', 'Макс.'].map((name) => h('th', {}, name)))),
+    h('tbody', {}, summary.kinds.map((kind) => h('tr', {},
+      h('td', {}, KIND_LABELS[kind.kind] ?? kind.kind, h('small', {}, kind.kind)),
+      cell(kind.count), cell(kind.errors, kind.errors > 0),
+      cell(formatMs(kind.p50Ms)), cell(formatMs(kind.p95Ms)), cell(formatMs(kind.maxMs))))));
+  const sections = [h('h3', {}, 'Операции (больше всего времени сверху)'), operations];
+  if (summary.memory.length) {
+    sections.push(h('h3', {}, 'Память процесса'));
+    sections.push(h('ul', { class: 'events' }, summary.memory.map((memory) => h('li', {},
+      h('b', {}, memory.label), `: сейчас ${formatMb(memory.lastMb)}, максимум ${formatMb(memory.maxMb)}, замеров ${memory.samples}`))));
+  }
+  if (summary.failures.length) {
+    sections.push(h('h3', {}, 'Последние ошибки'));
+    sections.push(h('ul', { class: 'events' }, summary.failures.map((failure) => h('li', {},
+      h('span', { class: 'when' }, `${formatAgo(summary.nowMs - failure.atMs)}  `),
+      h('b', { class: 'bad' }, failure.kind),
+      failure.subject ? `  «${failure.subject}»` : '',
+      h('span', { class: 'detail' }, `${failure.error}: ${failure.detail}`)))));
+  }
+  if (summary.slowest.length) {
+    sections.push(h('h3', {}, 'Самые медленные'));
+    sections.push(h('ul', { class: 'events' }, summary.slowest.map((slow) => h('li', {},
+      h('b', {}, formatMs(slow.ms)), `  ${slow.kind}`,
+      slow.subject ? `  «${slow.subject}»` : '',
+      h('span', { class: 'when' }, `  ${formatAgo(summary.nowMs - slow.atMs)}`)))));
+  }
+  body.replaceChildren(...sections);
+}
+
+async function refreshMetrics() {
+  try {
+    renderMetrics(await api.invoke('metrics_summary', { hours: Number($('metrics-hours').value) }));
+  } catch (error) {
+    $('metrics-body').replaceChildren(h('p', { class: 'hint error' }, String(error)));
+  }
+}
+
+async function openMetrics() {
+  closeViewer();
+  $('metrics').hidden = false;
+  await refreshMetrics();
+}
+
+function closeMetrics() { $('metrics').hidden = true; }
+
+$('open-metrics').addEventListener('click', openMetrics);
+$('metrics-close').addEventListener('click', closeMetrics);
+$('metrics-refresh').addEventListener('click', refreshMetrics);
+$('metrics-hours').addEventListener('change', refreshMetrics);
 
 // ---------- start ----------
 

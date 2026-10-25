@@ -4,26 +4,74 @@
 
 mod dto;
 
-use dto::{AnswerDto, NotebookDto, PassageViewDto, SourceDto, StatusDto, user_message};
+use dto::{AnswerDto, NotebookDto, PassageViewDto, SourceDto, StatusDto, SummaryDto, user_message};
 use notebook_rs::domain::NotebookId;
 use notebook_rs::embed_fast::FastEmbedder;
 use notebook_rs::error::Result as NotebookResult;
 use notebook_rs::llm::CodexExec;
+use notebook_rs::metrics::{
+    Clock, Metrics, RETENTION_DAYS, SqliteRecorder, SystemClock, summarize as summarize_metrics,
+};
 use notebook_rs::service::Notebooks;
 use notebook_rs::source::Sources;
 use notebook_rs::store::Store;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tauri::{Manager, State};
+
+/// Where measurements go (see `notebook_rs::metrics`) and where they are read from. Without a
+/// recorder (the file could not be opened) the program works and measures nothing.
+struct Telemetry {
+    metrics: Metrics,
+    recorder: Option<Arc<SqliteRecorder>>,
+    path: Option<PathBuf>,
+}
+
+impl Default for Telemetry {
+    fn default() -> Self {
+        Self {
+            metrics: Metrics::off(),
+            recorder: None,
+            path: None,
+        }
+    }
+}
+
+impl Telemetry {
+    fn open(path: &Path) -> Self {
+        match SqliteRecorder::open(path, RETENTION_DAYS, SystemClock::default().wall_ms()) {
+            Ok(recorder) => {
+                let recorder = Arc::new(recorder);
+                Self {
+                    metrics: Metrics::new(recorder.clone()),
+                    recorder: Some(recorder),
+                    path: Some(path.to_path_buf()),
+                }
+            }
+            Err(error) => {
+                eprintln!("notebook-rs: metrics are off: {error}");
+                Self::default()
+            }
+        }
+    }
+}
 
 /// The notebooks and the embedding model, built in the background: the first start downloads
 /// the model, and the window must open at once and say so instead of hanging.
 #[derive(Default)]
 struct Engine {
     slot: OnceLock<Result<Arc<Notebooks>, String>>,
+    telemetry: Telemetry,
 }
 
 impl Engine {
+    fn with_telemetry(telemetry: Telemetry) -> Self {
+        Self {
+            slot: OnceLock::new(),
+            telemetry,
+        }
+    }
+
     fn get(&self) -> Result<Arc<Notebooks>, String> {
         match self.slot.get() {
             None => Err("Поиск ещё готовится: при первом запуске скачивается модель (около 120 МБ). Подождите немного.".into()),
@@ -33,28 +81,57 @@ impl Engine {
     }
 }
 
-/// The same folder as the command line tool, so both see the same notebooks.
-fn start_engine() -> Result<Arc<Notebooks>, String> {
-    let home = std::env::var_os("HOME").ok_or("Не найдена домашняя папка.")?;
+/// The same folder as the command line tool, so both see the same notebooks. Loading the model
+/// is the slow part, so it is measured on its own, and so is the memory the program holds after.
+fn start_engine(metrics: &Metrics) -> Result<Arc<Notebooks>, String> {
+    let engine = metrics
+        .span("engine.start")
+        .run(|_| build_engine(metrics))
+        .map_err(|e| user_message(&e))?;
+    metrics.sample_memory("after_start");
+    Ok(engine)
+}
+
+fn build_engine(metrics: &Metrics) -> NotebookResult<Arc<Notebooks>> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| std::io::Error::other("the home folder is not set"))?;
     let directory = PathBuf::from(home).join(".notebook-rs");
-    std::fs::create_dir_all(&directory).map_err(|e| format!("{}: {e}", directory.display()))?;
-    let store = Store::open(&directory.join("notebooks.db")).map_err(|e| user_message(&e))?;
-    let embedder = FastEmbedder::new(directory.join("models")).map_err(|e| user_message(&e))?;
-    Ok(Arc::new(Notebooks::standard(
+    std::fs::create_dir_all(&directory)?;
+    let store = Store::open(&directory.join("notebooks.db"))?;
+    let embedder = metrics
+        .span("engine.model_load")
+        .run(|_| FastEmbedder::new(directory.join("models")))?;
+    Ok(Arc::new(Notebooks::standard_with_metrics(
         store,
         Arc::new(embedder),
         Box::new(CodexExec::default()),
+        metrics.clone(),
     )))
 }
 
 /// Runs blocking work off the window's thread and turns its error into text for the person.
+/// With a `kind` the command is measured (`command.<name>`, named by `subject`), so that the
+/// time the person waited can be told from the time of the steps inside.
 async fn blocking<T: Send + 'static>(
+    engine: &Engine,
+    kind: Option<&'static str>,
+    subject: Option<String>,
     work: impl FnOnce() -> NotebookResult<T> + Send + 'static,
 ) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(work)
-        .await
-        .map_err(|e| format!("Внутренняя ошибка: {e}"))?
-        .map_err(|e| user_message(&e))
+    let metrics = engine.telemetry.metrics.clone();
+    tauri::async_runtime::spawn_blocking(move || match kind {
+        None => work(),
+        Some(kind) => {
+            let mut span = metrics.span(kind);
+            if let Some(subject) = &subject {
+                span = span.subject(subject);
+            }
+            span.run(|_| work())
+        }
+    })
+    .await
+    .map_err(|e| format!("Внутренняя ошибка: {e}"))?
+    .map_err(|e| user_message(&e))
 }
 
 /// A notebook name as the person typed it: trimmed, and not empty.
@@ -87,7 +164,7 @@ fn status(engine: State<'_, Engine>) -> StatusDto {
 #[tauri::command]
 async fn list_notebooks(engine: State<'_, Engine>) -> Result<Vec<NotebookDto>, String> {
     let notebooks = engine.get()?;
-    blocking(move || {
+    blocking(&engine, None, None, move || {
         Ok(notebooks
             .list_notebooks()?
             .into_iter()
@@ -101,15 +178,21 @@ async fn list_notebooks(engine: State<'_, Engine>) -> Result<Vec<NotebookDto>, S
 async fn create_notebook(engine: State<'_, Engine>, name: String) -> Result<NotebookDto, String> {
     let notebooks = engine.get()?;
     let name = clean_name(&name)?;
-    blocking(move || {
-        let id = notebooks.notebook(&name)?;
-        let info = notebooks
-            .list_notebooks()?
-            .into_iter()
-            .find(|info| info.id == id)
-            .expect("a notebook that was just created is listed");
-        Ok(info.into())
-    })
+    let subject = Some(name.clone());
+    blocking(
+        &engine,
+        Some("command.create_notebook"),
+        subject,
+        move || {
+            let id = notebooks.notebook(&name)?;
+            let info = notebooks
+                .list_notebooks()?
+                .into_iter()
+                .find(|info| info.id == id)
+                .expect("a notebook that was just created is listed");
+            Ok(info.into())
+        },
+    )
     .await
 }
 
@@ -119,7 +202,7 @@ async fn list_sources(
     notebook_id: i64,
 ) -> Result<Vec<SourceDto>, String> {
     let notebooks = engine.get()?;
-    blocking(move || {
+    blocking(&engine, None, None, move || {
         Ok(notebooks
             .sources(NotebookId(notebook_id))?
             .into_iter()
@@ -140,8 +223,12 @@ async fn add_source(
     let notebooks = engine
         .get()
         .inspect_err(|message| eprintln!("notebook-rs: refused: {message}"))?;
-    let result = blocking(move || {
-        let document = Sources::standard().read(location.trim())?;
+    let metrics = engine.telemetry.metrics.clone();
+    let subject = Some(location.clone());
+    let result = blocking(&engine, Some("command.add_source"), subject, move || {
+        let document = Sources::standard()
+            .with_metrics(metrics)
+            .read(location.trim())?;
         notebooks.add_source(NotebookId(notebook_id), &document.title, &document.text)
     })
     .await;
@@ -159,7 +246,11 @@ async fn delete_source(
     title: String,
 ) -> Result<(), String> {
     let notebooks = engine.get()?;
-    blocking(move || notebooks.delete_source(NotebookId(notebook_id), &title)).await
+    let subject = Some(title.clone());
+    blocking(&engine, Some("command.delete_source"), subject, move || {
+        notebooks.delete_source(NotebookId(notebook_id), &title)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -170,7 +261,12 @@ async fn ask(
     deep: bool,
 ) -> Result<AnswerDto, String> {
     let notebooks = engine.get()?;
-    blocking(move || {
+    let kind = if deep {
+        "command.ask_deep"
+    } else {
+        "command.ask"
+    };
+    blocking(&engine, Some(kind), None, move || {
         let id = NotebookId(notebook_id);
         let answer = if deep {
             notebooks.ask_deep(id, &question)?
@@ -189,7 +285,8 @@ async fn summarize(
     source: Option<String>,
 ) -> Result<AnswerDto, String> {
     let notebooks = engine.get()?;
-    blocking(move || {
+    let subject = Some(source.clone().unwrap_or_else(|| "*".to_string()));
+    blocking(&engine, Some("command.summarize"), subject, move || {
         Ok(notebooks
             .summarize(NotebookId(notebook_id), source.as_deref())?
             .into())
@@ -205,7 +302,8 @@ async fn compare(
     second: String,
 ) -> Result<AnswerDto, String> {
     let notebooks = engine.get()?;
-    blocking(move || {
+    let subject = Some(format!("{first} + {second}"));
+    blocking(&engine, Some("command.compare"), subject, move || {
         Ok(notebooks
             .compare(NotebookId(notebook_id), &first, &second)?
             .into())
@@ -223,12 +321,33 @@ async fn source_view(
     quote: Option<String>,
 ) -> Result<Vec<PassageViewDto>, String> {
     let notebooks = engine.get()?;
-    blocking(move || {
+    let subject = Some(title.clone());
+    blocking(&engine, Some("command.source_view"), subject, move || {
         let cited = ordinal.zip(quote.as_deref());
         let view = notebooks.source_view(NotebookId(notebook_id), &title, cited)?;
         Ok(view.into_iter().map(Into::into).collect())
     })
     .await
+}
+
+/// The metrics of the last `hours` hours, for the panel of the window.
+#[tauri::command]
+async fn metrics_summary(engine: State<'_, Engine>, hours: u64) -> Result<SummaryDto, String> {
+    let (Some(recorder), Some(path)) = (
+        engine.telemetry.recorder.clone(),
+        engine.telemetry.path.clone(),
+    ) else {
+        return Err("Метрики выключены: файл метрик не удалось открыть.".into());
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        recorder.flush();
+        let now = SystemClock::default().wall_ms();
+        summarize_metrics(&path, now - (hours as i64) * 3_600_000)
+            .map(|summary| SummaryDto::from_summary(summary, now))
+            .map_err(|e| user_message(&e))
+    })
+    .await
+    .map_err(|e| format!("Внутренняя ошибка: {e}"))?
 }
 
 /// The commands the page may call. The app and the tests build their windows from this.
@@ -243,18 +362,26 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         ask,
         summarize,
         compare,
-        source_view
+        source_view,
+        metrics_summary
     ])
 }
 
 pub fn run() {
+    // The same folder as the notebooks; the metrics file lives next to the database.
+    let metrics_file = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".notebook-rs"))
+        .filter(|directory| std::fs::create_dir_all(directory).is_ok())
+        .map(|directory| directory.join("metrics.db"));
+    let telemetry = metrics_file.map_or_else(Telemetry::default, |file| Telemetry::open(&file));
     configure(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
-        .manage(Engine::default())
+        .manage(Engine::with_telemetry(telemetry))
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
-                let result = start_engine();
+                let metrics = handle.state::<Engine>().telemetry.metrics.clone();
+                let result = start_engine(&metrics);
                 match &result {
                     Ok(_) => eprintln!("notebook-rs: the engine is ready"),
                     Err(message) => eprintln!("notebook-rs: the engine did not start: {message}"),
@@ -474,6 +601,109 @@ mod ipc_tests {
             json!({"notebookId": id, "location": pasted}),
         );
         assert_eq!(added.unwrap(), json!(1));
+    }
+
+    /// An engine whose measurements go to a real metrics file in `directory`.
+    fn measured_engine(directory: &Path) -> Engine {
+        let engine = Engine::with_telemetry(Telemetry::open(&directory.join("metrics.db")));
+        let notebooks = Notebooks::standard_with_metrics(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(Fixed(Arc::new(std::sync::atomic::AtomicUsize::new(0)))),
+            engine.telemetry.metrics.clone(),
+        );
+        engine.slot.set(Ok(Arc::new(notebooks))).ok();
+        engine
+    }
+
+    fn kinds_in(summary: &Value) -> Vec<String> {
+        summary["kinds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k["kind"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn commands_and_their_steps_are_measured_and_the_summary_shows_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let window = window(measured_engine(directory.path()));
+        let id = call(&window, "create_notebook", json!({"name": "n"})).unwrap()["id"].clone();
+        let file = directory.path().join("договор.txt");
+        std::fs::write(&file, "Срок действия договора составляет два года.").unwrap();
+        call(
+            &window,
+            "add_source",
+            json!({"notebookId": id, "location": file.to_str().unwrap()}),
+        )
+        .unwrap();
+        call(
+            &window,
+            "ask",
+            json!({"notebookId": id, "question": "Какой срок?", "deep": false}),
+        )
+        .unwrap();
+
+        let summary = call(&window, "metrics_summary", json!({"hours": 1})).unwrap();
+
+        let kinds = kinds_in(&summary);
+        for expected in [
+            "command.create_notebook",
+            "command.add_source",
+            "command.ask",
+            "source.read",
+            "source.add",
+            "ask",
+            "llm.complete",
+            "embed.passages",
+            "retrieve.hybrid",
+        ] {
+            assert!(
+                kinds.contains(&expected.to_string()),
+                "{expected} is missing from {kinds:?}"
+            );
+        }
+        let memory: Vec<&str> = summary["memory"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["label"].as_str().unwrap())
+            .collect();
+        assert!(memory.contains(&"after_add"), "{memory:?}");
+        assert!(summary["failures"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_shows_up_in_the_failures_with_its_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let window = window(measured_engine(directory.path()));
+        let id = call(&window, "create_notebook", json!({"name": "n"})).unwrap()["id"].clone();
+
+        let result = call(
+            &window,
+            "add_source",
+            json!({"notebookId": id, "location": "/нет/особый файл.pdf"}),
+        );
+        assert!(result.is_err());
+
+        let summary = call(&window, "metrics_summary", json!({"hours": 1})).unwrap();
+        let failures = summary["failures"].as_array().unwrap();
+        let read = failures
+            .iter()
+            .find(|f| f["kind"] == "source.read")
+            .expect("the reading failed");
+        assert_eq!(read["subject"], "/нет/особый файл.pdf");
+        assert_eq!(read["error"], "source");
+        assert!(read["detail"].as_str().unwrap().contains("особый файл.pdf"));
+        assert!(failures.iter().any(|f| f["kind"] == "command.add_source"));
+    }
+
+    #[test]
+    fn without_a_metrics_file_the_panel_is_told_they_are_off() {
+        let window = window(ready_engine());
+        let error = call(&window, "metrics_summary", json!({"hours": 1})).unwrap_err();
+        assert!(error.as_str().unwrap().contains("выключены"), "{error}");
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub use text::TextReader;
 pub use web::{WebReader, html_to_markdown};
 
 use crate::error::{Error, Result};
+use crate::metrics::Metrics;
 
 /// A source ready to be split into passages: Markdown or plain text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,11 +33,22 @@ pub trait Reader: Send + Sync {
 /// A chain of responsibility: readers are tried in order.
 pub struct Sources {
     readers: Vec<Box<dyn Reader>>,
+    metrics: Metrics,
 }
 
 impl Sources {
     pub fn new(readers: Vec<Box<dyn Reader>>) -> Self {
-        Self { readers }
+        Self {
+            readers,
+            metrics: Metrics::off(),
+        }
+    }
+
+    /// Measures every reading (`source.read`, named by the location): reading is where
+    /// a particular file or page most often goes wrong.
+    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Web addresses, then PDF files, then everything else as text.
@@ -49,11 +61,19 @@ impl Sources {
     }
 
     pub fn read(&self, location: &str) -> Result<Document> {
-        self.readers
-            .iter()
-            .find(|reader| reader.accepts(location))
-            .ok_or_else(|| Error::Source(format!("no reader for {location}")))?
-            .read(location)
+        self.metrics
+            .span("source.read")
+            .subject(location)
+            .run(|span| {
+                let document = self
+                    .readers
+                    .iter()
+                    .find(|reader| reader.accepts(location))
+                    .ok_or_else(|| Error::Source(format!("no reader for {location}")))?
+                    .read(location)?;
+                span.set("chars", document.text.chars().count() as i64);
+                Ok(document)
+            })
     }
 }
 
@@ -171,6 +191,75 @@ mod tests {
     fn a_location_nobody_accepts_is_an_error_that_names_it() {
         let error = chain().read("zzz").unwrap_err().to_string();
         assert!(error.contains("zzz"), "{error}");
+    }
+
+    use crate::metrics::{MemoryRecorder, Metrics};
+    use std::sync::Arc;
+
+    fn measured_chain() -> (Sources, Arc<MemoryRecorder>) {
+        let recorder = Arc::new(MemoryRecorder::default());
+        let sources = chain().with_metrics(Metrics::new(recorder.clone()));
+        (sources, recorder)
+    }
+
+    #[test]
+    fn every_reading_is_measured_by_its_location() {
+        let (sources, recorder) = measured_chain();
+
+        sources.read("a:договор.pdf").unwrap();
+
+        let events = recorder.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "source.read");
+        assert_eq!(events[0].subject.as_deref(), Some("a:договор.pdf"));
+        assert!(events[0].ok);
+        assert!(events[0].micros.is_some());
+    }
+
+    #[test]
+    fn a_reading_that_fails_is_recorded_with_the_location_and_the_message() {
+        let (sources, recorder) = measured_chain();
+
+        assert!(sources.read("zzz особый файл").is_err());
+
+        let event = &recorder.events()[0];
+        assert!(!event.ok);
+        assert_eq!(event.subject.as_deref(), Some("zzz особый файл"));
+        assert_eq!(event.error.as_deref(), Some("source"));
+        assert!(
+            event
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("no reader for zzz")
+        );
+    }
+
+    #[test]
+    fn the_size_of_what_was_read_is_recorded() {
+        struct Sized;
+        impl Reader for Sized {
+            fn accepts(&self, _: &str) -> bool {
+                true
+            }
+            fn read(&self, _: &str) -> Result<Document> {
+                Ok(Document {
+                    title: "t".into(),
+                    text: "четыре".into(),
+                })
+            }
+        }
+        let recorder = Arc::new(MemoryRecorder::default());
+        let sources =
+            Sources::new(vec![Box::new(Sized)]).with_metrics(Metrics::new(recorder.clone()));
+
+        sources.read("x").unwrap();
+
+        assert!(
+            recorder.events()[0]
+                .fields
+                .contains(&("chars".to_string(), 6))
+        );
     }
 
     #[test]
