@@ -255,3 +255,8 @@ ul.events { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; fo
 ul.events li { overflow-wrap: anywhere; }
 ul.events .when { color: var(--muted); }
 ul.events .detail { display: block; color: var(--muted); }
+
+/* Who answers */
+.account { border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 6px; }
+.account .hint { min-height: 0; margin: 0; }
+.account button { width: 100%; }

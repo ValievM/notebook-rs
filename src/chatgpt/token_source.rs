@@ -236,6 +236,29 @@ mod tests {
     }
 
     #[test]
+    fn if_another_process_refreshed_first_its_new_pair_is_used_instead_of_asking_to_sign_in() {
+        // The window and the command line share the file. When this process asks to refresh with
+        // a refresh token that the other one has just spent, the server refuses, but the file
+        // already holds the new pair: that is the good one.
+        let store = MemoryStore::with(Some(sample(NOW - 1)));
+        let other_process = store.clone();
+        let server = FakeServer::start(move |_| {
+            let mut fresh = sample(NOW + 3_600_000);
+            fresh.access_token = "OTHER-PROCESS-ACCESS".into();
+            fresh.refresh_token = "OTHER-PROCESS-REFRESH".into();
+            other_process.save(&fresh).unwrap();
+            Reply::json(
+                400,
+                r#"{"error":"invalid_grant","error_description":"already used"}"#,
+            )
+        });
+
+        let token = source_for(&server, store).token().unwrap();
+
+        assert_eq!(token, "OTHER-PROCESS-ACCESS");
+    }
+
+    #[test]
     fn a_server_failure_is_not_taken_for_a_lost_sign_in() {
         let server = FakeServer::start(|_| Reply::json(503, "later"));
         let error = source_for(&server, MemoryStore::with(Some(sample(NOW - 1))))

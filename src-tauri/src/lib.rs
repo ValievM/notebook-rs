@@ -4,7 +4,11 @@
 
 mod dto;
 
-use dto::{AnswerDto, NotebookDto, PassageViewDto, SourceDto, StatusDto, SummaryDto, user_message};
+use dto::{
+    AccountDto, AnswerDto, NotebookDto, PassageViewDto, SourceDto, StatusDto, SummaryDto,
+    user_message,
+};
+use notebook_rs::chatgpt::{ChatGptAccount, open_in_browser};
 use notebook_rs::domain::NotebookId;
 use notebook_rs::embed_fast::FastEmbedder;
 use notebook_rs::error::Result as NotebookResult;
@@ -60,18 +64,41 @@ impl Telemetry {
 
 /// The notebooks and the embedding model, built in the background: the first start downloads
 /// the model, and the window must open at once and say so instead of hanging.
-#[derive(Default)]
 struct Engine {
     slot: OnceLock<Result<Arc<Notebooks>, String>>,
     telemetry: Telemetry,
+    account: Arc<ChatGptAccount>,
+    /// Opens an address in the browser (replaced in the tests).
+    open_browser: fn(&str) -> NotebookResult<()>,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self {
+            slot: OnceLock::new(),
+            telemetry: Telemetry::default(),
+            // A file that is not there: nobody is signed in.
+            account: Arc::new(ChatGptAccount::open(
+                std::env::temp_dir()
+                    .join("notebook-rs-no-such-folder")
+                    .join("chatgpt-auth.json"),
+            )),
+            open_browser: open_in_browser,
+        }
+    }
 }
 
 impl Engine {
     fn with_telemetry(telemetry: Telemetry) -> Self {
         Self {
-            slot: OnceLock::new(),
             telemetry,
+            ..Self::default()
         }
+    }
+
+    fn with_account(mut self, account: ChatGptAccount) -> Self {
+        self.account = Arc::new(account);
+        self
     }
 
     fn get(&self) -> Result<Arc<Notebooks>, String> {
@@ -85,16 +112,16 @@ impl Engine {
 
 /// The same folder as the command line tool, so both see the same notebooks. Loading the model
 /// is the slow part, so it is measured on its own, and so is the memory the program holds after.
-fn start_engine(metrics: &Metrics) -> Result<Arc<Notebooks>, String> {
+fn start_engine(metrics: &Metrics, account: &ChatGptAccount) -> Result<Arc<Notebooks>, String> {
     let engine = metrics
         .span("engine.start")
-        .run(|_| build_engine(metrics))
+        .run(|_| build_engine(metrics, account))
         .map_err(|e| user_message(&e))?;
     metrics.sample_memory("after_start");
     Ok(engine)
 }
 
-fn build_engine(metrics: &Metrics) -> NotebookResult<Arc<Notebooks>> {
+fn build_engine(metrics: &Metrics, account: &ChatGptAccount) -> NotebookResult<Arc<Notebooks>> {
     let home = std::env::var_os("HOME")
         .ok_or_else(|| std::io::Error::other("the home folder is not set"))?;
     let directory = PathBuf::from(home).join(".notebook-rs");
@@ -106,7 +133,14 @@ fn build_engine(metrics: &Metrics) -> NotebookResult<Arc<Notebooks>> {
     Ok(Arc::new(Notebooks::standard_with_metrics(
         store,
         Arc::new(embedder),
-        Box::new(CodexExec::default()),
+        // The ChatGPT subscription when signed in, Codex when not; the choice is made at every
+        // question, so signing in from the window works at once. The model and how much it
+        // thinks can be chosen with these two variables (the same ones `nb` reads).
+        Box::new(account.llm(
+            Box::new(CodexExec::default()),
+            std::env::var("NOTEBOOK_RS_MODEL").ok().as_deref(),
+            std::env::var("NOTEBOOK_RS_EFFORT").ok().as_deref(),
+        )),
         metrics.clone(),
     )))
 }
@@ -367,6 +401,32 @@ fn start_sampler(telemetry: &Telemetry, every: Duration) -> Option<MemorySampler
         .ok()
 }
 
+/// Who answers now.
+#[tauri::command]
+fn account_status(engine: State<'_, Engine>) -> AccountDto {
+    AccountDto::new(engine.account.signed_in())
+}
+
+/// Signs in through the browser; waits up to five minutes for the person to approve.
+#[tauri::command]
+async fn account_sign_in(engine: State<'_, Engine>) -> Result<(), String> {
+    let (account, open) = (engine.account.clone(), engine.open_browser);
+    blocking(&engine, Some("command.sign_in"), None, move || {
+        account.sign_in("notebook-rs", &open)
+    })
+    .await
+}
+
+/// Forgets the sign-in on this computer.
+#[tauri::command]
+async fn account_sign_out(engine: State<'_, Engine>) -> Result<(), String> {
+    let account = engine.account.clone();
+    blocking(&engine, Some("command.sign_out"), None, move || {
+        account.sign_out()
+    })
+    .await
+}
+
 /// The commands the page may call. The app and the tests build their windows from this.
 fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
@@ -380,7 +440,10 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         summarize,
         compare,
         source_view,
-        metrics_summary
+        metrics_summary,
+        account_status,
+        account_sign_in,
+        account_sign_out
     ])
 }
 
@@ -390,17 +453,28 @@ pub fn run() {
         .map(|home| PathBuf::from(home).join(".notebook-rs"))
         .filter(|directory| std::fs::create_dir_all(directory).is_ok())
         .map(|directory| directory.join("metrics.db"));
+    let account_file = metrics_file
+        .as_ref()
+        .map(|file| file.with_file_name("chatgpt-auth.json"));
     let telemetry = metrics_file.map_or_else(Telemetry::default, |file| Telemetry::open(&file));
     let sampler = start_sampler(&telemetry, MEMORY_SAMPLE_EVERY);
     configure(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
-        .manage(Engine::with_telemetry(telemetry))
+        .manage(match account_file {
+            Some(file) => {
+                Engine::with_telemetry(telemetry).with_account(ChatGptAccount::open(file))
+            }
+            None => Engine::with_telemetry(telemetry),
+        })
         .manage(Sampler(sampler))
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
-                let metrics = handle.state::<Engine>().telemetry.metrics.clone();
-                let result = start_engine(&metrics);
+                let (metrics, account) = {
+                    let engine = handle.state::<Engine>();
+                    (engine.telemetry.metrics.clone(), engine.account.clone())
+                };
+                let result = start_engine(&metrics, &account);
                 match &result {
                     Ok(_) => eprintln!("notebook-rs: the engine is ready"),
                     Err(message) => eprintln!("notebook-rs: the engine did not start: {message}"),
@@ -720,6 +794,75 @@ mod ipc_tests {
             .collect();
         assert!(memory.contains(&"after_add"), "{memory:?}");
         assert!(summary["failures"].as_array().unwrap().is_empty());
+    }
+
+    fn engine_with_account(directory: &Path, signed_in: bool) -> Engine {
+        use notebook_rs::chatgpt::{Credentials, FileStore, Store};
+        let file = directory.join("chatgpt-auth.json");
+        if signed_in {
+            FileStore::new(file.clone())
+                .save(&Credentials {
+                    client_id: "c".into(),
+                    host_id: "h".into(),
+                    access_token: "a".into(),
+                    refresh_token: "r".into(),
+                    expires_at_ms: i64::MAX / 2,
+                    scope: "chatgpt.tokens.use.direct".into(),
+                })
+                .unwrap();
+        }
+        Engine::default().with_account(ChatGptAccount::open(file))
+    }
+
+    #[test]
+    fn the_page_is_told_who_answers() {
+        let directory = tempfile::tempdir().unwrap();
+        let window = window(engine_with_account(directory.path(), false));
+        assert_eq!(
+            call(&window, "account_status", json!({})).unwrap(),
+            json!({"signedIn": false, "provider": "codex"})
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let window = super::ipc_tests::window(engine_with_account(directory.path(), true));
+        assert_eq!(
+            call(&window, "account_status", json!({})).unwrap(),
+            json!({"signedIn": true, "provider": "chatgpt"})
+        );
+    }
+
+    #[test]
+    fn signing_out_forgets_the_sign_in() {
+        let directory = tempfile::tempdir().unwrap();
+        let window = window(engine_with_account(directory.path(), true));
+
+        call(&window, "account_sign_out", json!({})).unwrap();
+
+        assert_eq!(
+            call(&window, "account_status", json!({})).unwrap()["signedIn"],
+            false
+        );
+        assert!(!directory.path().join("chatgpt-auth.json").exists());
+    }
+
+    #[test]
+    fn a_browser_that_cannot_be_opened_is_an_error_for_the_page_not_a_hang() {
+        fn no_browser(_: &str) -> NotebookResult<()> {
+            Err(notebook_rs::error::Error::Io(std::io::Error::other(
+                "there is no browser",
+            )))
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_account(directory.path(), false);
+        engine.open_browser = no_browser;
+        let window = window(engine);
+
+        let error = call(&window, "account_sign_in", json!({})).unwrap_err();
+
+        assert!(
+            error.as_str().unwrap().contains("there is no browser"),
+            "{error}"
+        );
     }
 
     #[test]

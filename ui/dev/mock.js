@@ -15,6 +15,8 @@ const data = {
   ],
 };
 
+const account = { signedIn: false };
+
 const passages = {
   'договор.md': [
     'Договор аренды > Срок\n\nСрок действия договора составляет два года с даты подписания.',
@@ -51,6 +53,9 @@ export const api = {
       case 'delete_source':
         data.sources = data.sources.filter((s) => s.title !== args.title);
         return null;
+      case 'account_status': return { signedIn: account.signedIn, provider: account.signedIn ? 'chatgpt' : 'codex' };
+      case 'account_sign_in': await delay(900); account.signedIn = true; return null;
+      case 'account_sign_out': account.signedIn = false; return null;
       case 'metrics_summary': {
         const now = Date.now();
         return {

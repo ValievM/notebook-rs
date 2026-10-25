@@ -410,6 +410,41 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') { closeViewer(); closeMetrics(); }
 });
 
+// ---------- who answers ----------
+
+async function refreshAccount() {
+  try {
+    const account = await api.invoke('account_status');
+    state.account = account;
+    $('account-line').textContent = account.signedIn
+      ? 'Отвечает ChatGPT по вашей подписке'
+      : 'Отвечает Codex. Вход через ChatGPT даст свою модель и лимиты.';
+    $('account-button').textContent = account.signedIn ? 'Выйти из ChatGPT' : 'Войти через ChatGPT';
+  } catch (error) {
+    $('account-line').textContent = String(error);
+  }
+}
+
+$('account-button').addEventListener('click', async () => {
+  const button = $('account-button');
+  button.disabled = true;
+  try {
+    if (state.account?.signedIn) {
+      await api.invoke('account_sign_out');
+      toast('Вход удалён: отвечает Codex.');
+    } else {
+      $('account-line').textContent = 'Жду подтверждения в браузере: войдите и разрешите использовать план ChatGPT (до 5 минут)…';
+      await api.invoke('account_sign_in');
+      toast('Вход выполнен: отвечает ChatGPT.');
+    }
+  } catch (error) {
+    toast(String(error), 'error');
+  } finally {
+    button.disabled = false;
+    await refreshAccount();
+  }
+});
+
 // ---------- metrics ----------
 
 const KIND_LABELS = {
@@ -520,6 +555,7 @@ $('metrics-hours').addEventListener('change', refreshMetrics);
 // ---------- start ----------
 
 async function start() {
+  refreshAccount();
   working(0); // buttons wait until the engine is ready
   renderEmptyDialog();
   for (;;) {

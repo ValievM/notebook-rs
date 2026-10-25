@@ -213,6 +213,23 @@ impl SummaryDto {
     }
 }
 
+/// Who answers: the ChatGPT subscription (signed in) or Codex (not).
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDto {
+    pub signed_in: bool,
+    pub provider: &'static str,
+}
+
+impl AccountDto {
+    pub fn new(signed_in: bool) -> Self {
+        Self {
+            signed_in,
+            provider: if signed_in { "chatgpt" } else { "codex" },
+        }
+    }
+}
+
 /// An error explained to the person in the window, with the detail kept at the end.
 pub fn user_message(error: &Error) -> String {
     match error {
@@ -384,6 +401,18 @@ mod tests {
                 "failures": [{"atMs": 5, "kind": "source.read", "subject": "scan.pdf", "error": "source", "detail": "no text layer"}],
                 "slowest": [{"atMs": 7, "kind": "llm.complete", "subject": null, "ms": 15100.0}]
             })
+        );
+    }
+
+    #[test]
+    fn who_answers_reaches_the_page_as_a_flag_and_a_provider_name() {
+        assert_eq!(
+            serde_json::to_value(AccountDto::new(true)).unwrap(),
+            json!({"signedIn": true, "provider": "chatgpt"})
+        );
+        assert_eq!(
+            serde_json::to_value(AccountDto::new(false)).unwrap(),
+            json!({"signedIn": false, "provider": "codex"})
         );
     }
 
