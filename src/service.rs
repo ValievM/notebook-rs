@@ -2,7 +2,8 @@
 //! split and embedded on the way in, and how a question is searched and answered on the way out.
 
 use crate::answer::{self, Answer};
-use crate::chunk::{Chunker, ParagraphChunker};
+use crate::chunk::Chunker;
+use crate::chunk_markdown::MarkdownChunker;
 use crate::domain::NotebookId;
 use crate::embed::Embedder;
 use crate::error::Result;
@@ -38,7 +39,7 @@ impl Notebooks {
         }
     }
 
-    /// The usual wiring: paragraph chunks, offline embeddings, BM25 and vectors fused.
+    /// The usual wiring: Markdown-aware chunks (plain text works too), BM25 and vectors fused.
     pub fn standard(store: Store, embedder: Arc<dyn Embedder>, llm: Box<dyn Llm>) -> Self {
         let store = Arc::new(store);
         let retriever = HybridRetriever::new(vec![
@@ -47,7 +48,7 @@ impl Notebooks {
         ]);
         Self::new(
             store,
-            Box::new(ParagraphChunker::default()),
+            Box::new(MarkdownChunker::default()),
             embedder,
             Box::new(retriever),
             llm,
