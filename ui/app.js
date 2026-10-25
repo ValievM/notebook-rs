@@ -96,6 +96,8 @@ async function loadNotebooks(selectId) {
 }
 
 function renderNotebooks() {
+  const current = state.notebooks.find((n) => n.id === state.current);
+  $('notebook-title').textContent = current ? current.name : 'Блокнот не выбран';
   const list = $('notebook-list');
   list.replaceChildren(...state.notebooks.map((notebook) =>
     h('li', {},
@@ -103,7 +105,7 @@ function renderNotebooks() {
         class: 'notebook-item',
         type: 'button',
         'aria-current': String(notebook.id === state.current),
-        onclick: () => selectNotebook(notebook.id),
+        onclick: () => { closeNotebookMenu(); selectNotebook(notebook.id); },
       }, h('span', {}, notebook.name), h('span', { class: 'count' }, notebook.sources)))));
 }
 
@@ -118,12 +120,28 @@ async function selectNotebook(id) {
   await loadSources();
 }
 
+function closeNotebookMenu() {
+  $('notebook-menu').hidden = true;
+  $('notebook-button').setAttribute('aria-expanded', 'false');
+}
+
+$('notebook-button').addEventListener('click', () => {
+  const open = $('notebook-menu').hidden;
+  $('notebook-menu').hidden = !open;
+  $('notebook-button').setAttribute('aria-expanded', String(open));
+  if (open) $('new-notebook-name').focus();
+});
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('.notebook-switch')) closeNotebookMenu();
+});
+
 $('new-notebook').addEventListener('submit', async (event) => {
   event.preventDefault();
   const input = $('new-notebook-name');
   try {
     const created = await api.invoke('create_notebook', { name: input.value });
     input.value = '';
+    closeNotebookMenu();
     await loadNotebooks(created.id);
   } catch (error) { toast(String(error), 'error'); }
 });
@@ -263,6 +281,8 @@ api.onDrop?.((payload) => {
 
 // ---------- dialog ----------
 
+const STARTERS = ["О чём эти источники?", "Назови главные факты и числа", "Какие здесь сроки и условия?"];
+
 function renderEmptyDialog() {
   const messages = $('messages');
   messages.querySelector('[data-empty]')?.remove();
@@ -272,7 +292,13 @@ function renderEmptyDialog() {
     : state.sources.length === 0
       ? ['Добавьте источники', 'Перетащите файлы или вставьте адрес страницы слева. Потом задавайте вопросы.']
       : ['Задайте вопрос', 'Ответ строится только по источникам блокнота, а каждая цитата проверена по тексту.'];
-  messages.append(h('div', { class: 'empty', 'data-empty': '' }, h('strong', {}, text[0]), text[1]));
+  const box = h('div', { class: 'empty', 'data-empty': '' }, h('strong', {}, text[0]), text[1]);
+  if (state.current !== null && state.sources.length > 0) {
+    // Starting points: they only fill the question box; the person sends it.
+    box.append(h('div', { class: 'chips' }, ...STARTERS.map((starter) =>
+      h('button', { class: 'chip', type: 'button', onclick: () => { $('question').value = starter; $('question').focus(); } }, starter))));
+  }
+  messages.append(box);
 }
 
 function addMessage(node) {
@@ -407,7 +433,7 @@ async function openSource(title, ordinal = null, quote = null) {
 function closeViewer() { $('viewer').hidden = true; }
 $('viewer-close').addEventListener('click', closeViewer);
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') { closeViewer(); closeMetrics(); closeSettings(); }
+  if (event.key === 'Escape') { closeViewer(); closeMetrics(); closeSettings(); closeNotebookMenu(); }
 });
 
 // ---------- who answers ----------

@@ -9,19 +9,27 @@
 <body>
   <div id="banner" class="banner" role="status" hidden></div>
 
-  <div class="app">
-    <aside class="notebooks" aria-label="Блокноты">
-      <h1>Блокноты</h1>
-      <ul id="notebook-list" class="list"></ul>
-      <form id="new-notebook" class="inline-form">
-        <input id="new-notebook-name" type="text" placeholder="Новый блокнот" aria-label="Название нового блокнота" autocomplete="off">
-        <button type="submit" class="icon" aria-label="Создать блокнот">+</button>
-      </form>
-      <button id="open-settings" type="button" class="quiet">Настройки</button>
+  <header class="topbar">
+    <div class="notebook-switch">
+      <button id="notebook-button" type="button" class="notebook-button" aria-haspopup="true" aria-expanded="false">
+        <span id="notebook-title">Блокнот не выбран</span><span aria-hidden="true">▾</span>
+      </button>
+      <div id="notebook-menu" class="menu" hidden>
+        <ul id="notebook-list" class="list"></ul>
+        <form id="new-notebook" class="inline-form">
+          <input id="new-notebook-name" type="text" placeholder="Новый блокнот" aria-label="Название нового блокнота" autocomplete="off">
+          <button type="submit" class="icon" aria-label="Создать блокнот">+</button>
+        </form>
+      </div>
+    </div>
+    <div class="topbar-actions">
       <button id="open-metrics" type="button" class="quiet">Метрики</button>
-    </aside>
+      <button id="open-settings" type="button" class="quiet">Настройки</button>
+    </div>
+  </header>
 
-    <section class="sources" aria-label="Источники">
+  <div class="app">
+    <section class="sources panel" aria-label="Источники">
       <h2>Источники</h2>
       <div id="drop" class="drop">Перетащите сюда файлы: текст, Markdown, PDF</div>
       <button id="pick-files" type="button">Добавить файлы…</button>
@@ -31,11 +39,6 @@
       </form>
       <p id="source-status" class="hint" role="status"></p>
       <ul id="source-list" class="list"></ul>
-      <div class="source-tools">
-        <button id="summarize" type="button">Конспект</button>
-        <button id="compare" type="button">Сравнить</button>
-        <p id="selection-hint" class="hint"></p>
-      </div>
     </section>
 
     <main class="chat" aria-label="Диалог">
@@ -51,6 +54,13 @@
         </div>
       </form>
     </main>
+
+    <aside class="studio panel" aria-label="Студия">
+      <h2>Студия</h2>
+      <button id="summarize" type="button" class="tile">Конспект</button>
+      <button id="compare" type="button" class="tile">Сравнить</button>
+      <p id="selection-hint" class="hint"></p>
+    </aside>
 
     <aside id="viewer" class="viewer" hidden aria-label="Источник">
       <header>
