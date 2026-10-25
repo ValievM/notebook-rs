@@ -509,6 +509,27 @@ $('sign-in-button').addEventListener('click', async () => {
   }
 });
 
+// ---------- theme ----------
+
+const THEME_KEY = 'notebook-rs-theme';
+
+// The choice is a per-window convenience: if the browser refuses storage, the system theme is used.
+function savedTheme() {
+  try { return localStorage.getItem(THEME_KEY) || 'system'; } catch { return 'system'; }
+}
+
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+}
+
+applyTheme(savedTheme());
+$('theme-select').value = savedTheme();
+$('theme-select').addEventListener('change', (event) => {
+  applyTheme(event.target.value);
+  try { localStorage.setItem(THEME_KEY, event.target.value); } catch { /* applied for now only */ }
+});
+
 // ---------- settings ----------
 
 function closeSettings() { $('settings').hidden = true; hideSignOutConfirm(); }
