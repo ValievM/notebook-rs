@@ -5,6 +5,9 @@ edition = "2024"
 description = "A NotebookLM-style research notebook: your sources, a strong model, answers with checked citations."
 license = "MIT"
 
+[workspace]
+members = ["src-tauri"]
+
 [[bin]]
 name = "nb"
 path = "src/main.rs"

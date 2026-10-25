@@ -20,7 +20,8 @@ notebook-rs: исследовательский блокнот в духе Noteb
 
 ## Команды
 ```
-cargo fmt && cargo clippy --all-targets && cargo test
+cargo fmt --all && cargo clippy --workspace --all-targets && cargo test --workspace
+cargo run -p notebook-rs-app   # окно
 cargo run -- add <блокнот> <файл>
 cargo run -- ask <блокнот> "вопрос"
 ```

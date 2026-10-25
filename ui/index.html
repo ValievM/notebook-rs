@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Notebook</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="banner" class="banner" role="status" hidden></div>
+
+  <div class="app">
+    <aside class="notebooks" aria-label="Блокноты">
+      <h1>Блокноты</h1>
+      <ul id="notebook-list" class="list"></ul>
+      <form id="new-notebook" class="inline-form">
+        <input id="new-notebook-name" type="text" placeholder="Новый блокнот" aria-label="Название нового блокнота" autocomplete="off">
+        <button type="submit" class="icon" aria-label="Создать блокнот">+</button>
+      </form>
+    </aside>
+
+    <section class="sources" aria-label="Источники">
+      <h2>Источники</h2>
+      <div id="drop" class="drop">Перетащите сюда файлы: текст, Markdown, PDF</div>
+      <button id="pick-files" type="button">Добавить файлы…</button>
+      <form id="add-url" class="inline-form">
+        <input id="url" type="url" placeholder="Адрес страницы https://…" aria-label="Адрес веб-страницы" autocomplete="off">
+        <button type="submit">Добавить</button>
+      </form>
+      <p id="source-status" class="hint" role="status"></p>
+      <ul id="source-list" class="list"></ul>
+      <div class="source-tools">
+        <button id="summarize" type="button">Конспект</button>
+        <button id="compare" type="button">Сравнить</button>
+        <p id="selection-hint" class="hint"></p>
+      </div>
+    </section>
+
+    <main class="chat" aria-label="Диалог">
+      <div id="messages" class="messages" role="log" aria-live="polite"></div>
+      <form id="composer" class="composer">
+        <textarea id="question" rows="2" placeholder="Задайте вопрос по источникам блокнота" aria-label="Вопрос"></textarea>
+        <div class="composer-row">
+          <label class="check" title="Модель сама планирует несколько поисков: для сравнений и вопросов из нескольких частей. Отвечает дольше.">
+            <input type="checkbox" id="deep">
+            <span>Глубокий вопрос</span>
+          </label>
+          <button type="submit" id="send" class="primary">Спросить</button>
+        </div>
+      </form>
+    </main>
+
+    <aside id="viewer" class="viewer" hidden aria-label="Источник">
+      <header>
+        <h2 id="viewer-title"></h2>
+        <button id="viewer-close" type="button" class="icon" aria-label="Закрыть источник">×</button>
+      </header>
+      <div id="viewer-body" class="viewer-body"></div>
+    </aside>
+  </div>
+
+  <div id="toast" class="toast" role="alert" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
