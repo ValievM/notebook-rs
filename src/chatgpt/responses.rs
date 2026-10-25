@@ -118,15 +118,18 @@ impl Failure {
     }
 }
 
+/// A model the account can use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelEntry {
+    pub slug: String,
+    /// The name shown to people, when the server gives one.
+    pub display_name: Option<String>,
+}
+
 impl ChatGptLlm {
-    /// The model to ask for: the chosen one, or the first listed model of the account (asked
-    /// for once and remembered).
-    fn resolve_model(&self) -> Result<String> {
-        if let Some(model) = self.model.lock().expect(LOCK).clone() {
-            return Ok(model);
-        }
-        // The lock is not held while the server is asked; two first calls at once may both ask,
-        // which is harmless.
+    /// The models of the account that are meant to be chosen (visibility `list`), in the order
+    /// the server gives them.
+    pub fn models(&self) -> Result<Vec<ModelEntry>> {
         let token = self.tokens.token()?;
         let mut response = self
             .agent
@@ -146,18 +149,37 @@ impl ChatGptLlm {
         }
         let listing: serde_json::Value = serde_json::from_str(&body)
             .map_err(|_| Error::ModelUnavailable("the model list is not JSON".into()))?;
-        let model = listing["models"]
+        Ok(listing["models"]
             .as_array()
             .into_iter()
             .flatten()
-            .find(|m| {
-                m["visibility"] == "list" && m["slug"].as_str().is_some_and(|s| !s.is_empty())
+            .filter(|m| m["visibility"] == "list")
+            .filter_map(|m| {
+                let slug = m["slug"].as_str().filter(|s| !s.is_empty())?;
+                Some(ModelEntry {
+                    slug: slug.to_string(),
+                    display_name: m["display_name"].as_str().map(str::to_string),
+                })
             })
-            .and_then(|m| m["slug"].as_str())
+            .collect())
+    }
+
+    /// The model to ask for: the chosen one, or the first listed model of the account (asked
+    /// for once and remembered).
+    fn resolve_model(&self) -> Result<String> {
+        if let Some(model) = self.model.lock().expect(LOCK).clone() {
+            return Ok(model);
+        }
+        // The lock is not held while the server is asked; two first calls at once may both ask,
+        // which is harmless.
+        let model = self
+            .models()?
+            .into_iter()
+            .next()
             .ok_or_else(|| {
                 Error::ModelUnavailable("no models are available for this account".into())
             })?
-            .to_string();
+            .slug;
         *self.model.lock().expect(LOCK) = Some(model.clone());
         Ok(model)
     }
@@ -477,6 +499,53 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&server.requests()[1].body).unwrap();
         assert_eq!(body["model"], "the-first-listed");
         assert_eq!(llm.model_name().as_deref(), Some("the-first-listed"));
+    }
+
+    #[test]
+    fn the_models_of_the_account_are_listed_in_order_without_the_hidden_ones() {
+        let server = FakeServer::start(|_| {
+            Reply::json(
+                200,
+                r#"{"models":[
+                {"slug":"first-model","display_name":"First","visibility":"list"},
+                {"slug":"hidden-model","visibility":"hide"},
+                {"slug":"second-model","visibility":"list"},
+                {"slug":"","visibility":"list"}]}"#,
+            )
+        });
+
+        let models = ChatGptLlm::new(signed_in())
+            .with_base_url(&server.url)
+            .models()
+            .unwrap();
+
+        assert_eq!(
+            models,
+            vec![
+                ModelEntry {
+                    slug: "first-model".into(),
+                    display_name: Some("First".into())
+                },
+                ModelEntry {
+                    slug: "second-model".into(),
+                    display_name: None
+                },
+            ]
+        );
+        assert_eq!(
+            server.requests()[0].header("authorization"),
+            Some("Bearer ACCESS-SECRET")
+        );
+    }
+
+    #[test]
+    fn the_list_of_models_reports_a_rejected_token_like_any_other_call() {
+        let server = FakeServer::start(|_| Reply::json(401, r#"{"error":{"message":"bad"}}"#));
+        let error = ChatGptLlm::new(signed_in())
+            .with_base_url(&server.url)
+            .models()
+            .unwrap_err();
+        assert!(matches!(error, Error::SignIn(_)), "{error}");
     }
 
     #[test]

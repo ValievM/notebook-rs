@@ -26,7 +26,7 @@ pub use auto::AutoLlm;
 pub use credentials::Credentials;
 pub use login::{DEFAULT_PORT, LoginOptions, login, open_in_browser};
 pub use oauth::{OAuth, OAuthError, TokenError};
-pub use responses::ChatGptLlm;
+pub use responses::{ChatGptLlm, ModelEntry};
 pub use store::{FileStore, Store};
 pub use token_source::TokenSource;
 

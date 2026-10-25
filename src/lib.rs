@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod parallel;
 pub mod retrieve;
 pub mod service;
+pub mod settings;
 pub mod source;
 pub mod store;
 pub mod view;

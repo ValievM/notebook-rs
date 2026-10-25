@@ -8,6 +8,7 @@ use notebook_rs::{
     llm::CodexExec,
     metrics::{Clock, Metrics, RETENTION_DAYS, SqliteRecorder, SystemClock, report, summarize},
     service::Notebooks,
+    settings::{Settings, check_effort},
     source::Sources,
     store::Store,
 };
@@ -113,6 +114,16 @@ enum Command {
     Logout,
     /// Whether you are signed in, and who answers.
     Account,
+    /// The models your ChatGPT sign-in can use
+    Models,
+    /// Choose the model (and how much it thinks) for `nb` and the window
+    Use {
+        /// Model name from `nb models`
+        model: String,
+        /// low, medium or high (minimal also exists)
+        #[arg(long)]
+        effort: Option<String>,
+    },
     /// How long things took, how often they failed, how much memory the program held.
     Stats {
         /// How far back to look.
@@ -135,14 +146,21 @@ fn main() -> Result<()> {
     let metrics_path = path.with_file_name("metrics.db");
     let clock = SystemClock::default();
     let account = ChatGptAccount::open(path.with_file_name("chatgpt-auth.json"));
+    let settings_path = path.with_file_name("settings.json");
+    let settings =
+        Settings::load(&settings_path)?.overridden_by(cli.model.clone(), cli.effort.clone());
     // These need neither the notebooks nor the embedding model.
     match &cli.command {
         Command::Stats { hours } => return print_stats(&metrics_path, *hours, clock.wall_ms()),
         Command::Login { no_browser } => return sign_in(&account, *no_browser),
         Command::Logout => return sign_out(&account),
         Command::Account => {
-            print_account(&account, cli.model.as_deref());
+            print_account(&account, &settings);
             return Ok(());
+        }
+        Command::Models => return print_models(&account, &settings),
+        Command::Use { model, effort } => {
+            return choose_model(&account, &settings_path, model, effort.as_deref());
         }
         _ => {}
     }
@@ -168,8 +186,8 @@ fn main() -> Result<()> {
         embedder,
         Box::new(account.llm(
             Box::new(CodexExec::default()),
-            cli.model.as_deref(),
-            cli.effort.as_deref(),
+            settings.model.as_deref(),
+            settings.effort.as_deref(),
         )),
         metrics.clone(),
     );
@@ -216,7 +234,12 @@ fn main() -> Result<()> {
             let id = notebooks.notebook(&notebook)?;
             print_answer(&notebooks.compare(id, &first, &second)?);
         }
-        Command::Stats { .. } | Command::Login { .. } | Command::Logout | Command::Account => {
+        Command::Stats { .. }
+        | Command::Login { .. }
+        | Command::Logout
+        | Command::Account
+        | Command::Models
+        | Command::Use { .. } => {
             unreachable!("handled before the notebooks are opened")
         }
     }
@@ -275,15 +298,72 @@ fn sign_out(account: &ChatGptAccount) -> Result<()> {
     Ok(())
 }
 
-fn print_account(account: &ChatGptAccount, model: Option<&str>) {
+fn print_account(account: &ChatGptAccount, settings: &Settings) {
     if account.signed_in() {
         println!("Вход через ChatGPT: выполнен.");
         println!(
-            "Отвечает: ChatGPT, модель {}.",
-            model.unwrap_or("первая из списка вашего аккаунта")
+            "Отвечает: ChatGPT, модель {}, размышление: {}.",
+            settings
+                .model
+                .as_deref()
+                .unwrap_or("первая из списка вашего аккаунта"),
+            settings.effort.as_deref().unwrap_or("по умолчанию модели")
         );
     } else {
         println!("Вход через ChatGPT: не выполнен (выполните `nb login`).");
         println!("Отвечает: Codex (команда `codex exec`).");
     }
+}
+
+fn print_models(account: &ChatGptAccount, settings: &Settings) -> Result<()> {
+    let models = account.models()?;
+    for (index, model) in models.iter().enumerate() {
+        let chosen = match &settings.model {
+            Some(name) => name == &model.slug,
+            None => index == 0,
+        };
+        println!(
+            "{} {}{}",
+            if chosen { "*" } else { " " },
+            model.slug,
+            model
+                .display_name
+                .as_deref()
+                .map_or(String::new(), |name| format!("  ({name})"))
+        );
+    }
+    println!("\n* выбрана. Сменить: nb use <модель> --effort medium");
+    Ok(())
+}
+
+fn choose_model(
+    account: &ChatGptAccount,
+    settings_path: &std::path::Path,
+    model: &str,
+    effort: Option<&str>,
+) -> Result<()> {
+    if let Some(effort) = effort {
+        check_effort(effort)?;
+    }
+    if account.signed_in() {
+        let models = account.models()?;
+        if !models.iter().any(|m| m.slug == model) {
+            let names: Vec<_> = models.iter().map(|m| m.slug.as_str()).collect();
+            anyhow::bail!(
+                "модели «{model}» нет в списке аккаунта: {}",
+                names.join(", ")
+            );
+        }
+    }
+    let mut saved = Settings::load(settings_path)?;
+    saved.model = Some(model.to_string());
+    if let Some(effort) = effort {
+        saved.effort = Some(effort.to_string());
+    }
+    saved.save(settings_path)?;
+    println!(
+        "Сохранено: модель {model}, размышление {}. Окно подхватит после перезапуска.",
+        saved.effort.as_deref().unwrap_or("по умолчанию")
+    );
+    Ok(())
 }

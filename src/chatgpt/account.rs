@@ -94,6 +94,13 @@ impl ChatGptAccount {
         }
     }
 
+    /// The models this account can choose from, as the server lists them.
+    pub fn models(&self) -> Result<Vec<super::ModelEntry>> {
+        ChatGptLlm::new(self.tokens.clone())
+            .with_base_url(&self.api_base)
+            .models()
+    }
+
     /// The model: the ChatGPT plan when signed in, `fallback` when not. `model` and `effort`
     /// choose the model and how much it thinks; without them the account's first model is used.
     pub fn llm(
@@ -247,5 +254,21 @@ mod tests {
         assert_eq!(body["model"], "gpt-test");
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(api.requests()[0].header("authorization"), Some("Bearer A"));
+    }
+
+    #[test]
+    fn the_account_lists_its_models() {
+        let directory = tempfile::tempdir().unwrap();
+        let auth = auth_server();
+        let api = FakeServer::start(|_| {
+            Reply::json(200, r#"{"models":[{"slug":"m-1","visibility":"list"}]}"#)
+        });
+        let account = account(directory.path(), &auth).with_api_base(&api.url);
+        account.sign_in("notebook-rs", &approving).unwrap();
+
+        let models = account.models().unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug, "m-1");
     }
 }

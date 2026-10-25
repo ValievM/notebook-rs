@@ -127,6 +127,12 @@ fn build_engine(metrics: &Metrics, account: &ChatGptAccount) -> NotebookResult<A
     let directory = PathBuf::from(home).join(".notebook-rs");
     std::fs::create_dir_all(&directory)?;
     let store = Store::open(&directory.join("notebooks.db"))?;
+    // What `nb use` saved; the environment variables of the old way still win.
+    let settings = notebook_rs::settings::Settings::load(&directory.join("settings.json"))?
+        .overridden_by(
+            std::env::var("NOTEBOOK_RS_MODEL").ok(),
+            std::env::var("NOTEBOOK_RS_EFFORT").ok(),
+        );
     let embedder = metrics
         .span("engine.model_load")
         .run(|_| FastEmbedder::new(directory.join("models")))?;
@@ -138,8 +144,8 @@ fn build_engine(metrics: &Metrics, account: &ChatGptAccount) -> NotebookResult<A
         // thinks can be chosen with these two variables (the same ones `nb` reads).
         Box::new(account.llm(
             Box::new(CodexExec::default()),
-            std::env::var("NOTEBOOK_RS_MODEL").ok().as_deref(),
-            std::env::var("NOTEBOOK_RS_EFFORT").ok().as_deref(),
+            settings.model.as_deref(),
+            settings.effort.as_deref(),
         )),
         metrics.clone(),
     )))
