@@ -10,10 +10,17 @@
 //! removed from that project (see DECISIONS D-16).
 
 mod credentials;
+mod oauth;
 mod store;
+mod token_source;
+
+#[cfg(test)]
+mod testing;
 
 pub use credentials::Credentials;
+pub use oauth::{OAuth, OAuthError, TokenError};
 pub use store::{FileStore, Store};
+pub use token_source::TokenSource;
 
 /// The right to spend the subscription on model calls.
 pub const PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
