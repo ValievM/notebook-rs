@@ -88,6 +88,12 @@ enum Command {
         #[arg(long)]
         source: Option<String>,
     },
+    /// A study plan of one source (`--source <title>`) or of the whole notebook
+    Plan {
+        notebook: String,
+        #[arg(long)]
+        source: Option<String>,
+    },
     /// A diagram (boxes and arrows) of a topic, as text (the window draws it)
     Diagram { notebook: String, topic: String },
     /// Cut the sources of a notebook again and embed them again (after the way of cutting or
@@ -230,6 +236,10 @@ fn main() -> Result<()> {
                     map.rejected_quotes
                 );
             }
+        }
+        Command::Plan { notebook, source } => {
+            let id = notebooks.notebook(&notebook)?;
+            print_answer(&notebooks.study_plan(id, source.as_deref())?);
         }
         Command::Diagram { notebook, topic } => {
             let id = notebooks.notebook(&notebook)?;

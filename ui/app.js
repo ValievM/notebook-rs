@@ -84,7 +84,7 @@ function banner(message, kind = 'info') {
 function working(delta) {
   state.working += delta;
   const busy = state.working > 0 || !state.ready;
-  for (const id of ['send', 'summarize', 'compare', 'mindmap', 'diagram', 'diagram-go', 'pick-files', 'pick-folder']) $(id).disabled = busy;
+  for (const id of ['send', 'summarize', 'compare', 'mindmap', 'plan', 'diagram', 'diagram-go', 'pick-files', 'pick-folder']) $(id).disabled = busy;
   if (!busy) renderSelection();
 }
 
@@ -125,7 +125,7 @@ async function selectNotebook(id) {
   await loadHistory(id);
 }
 
-const ANSWER_KINDS = { ask: 'Ответ', summarize: 'Конспект', compare: 'Сравнение' };
+const ANSWER_KINDS = { ask: 'Ответ', summarize: 'Конспект', compare: 'Сравнение', plan: 'План изучения' };
 
 /** The dialog the notebook had when it was left: questions, answers with their citations. */
 async function loadHistory(id) {
@@ -261,6 +261,7 @@ function renderSelection() {
   $('summarize').disabled = busy || !hasNotebook || count > 1;
   $('compare').disabled = busy || count !== 2;
   $('mindmap').disabled = busy || !hasNotebook || count > 1;
+  $('plan').disabled = busy || !hasNotebook || count > 1;
   $('diagram').disabled = busy || !hasNotebook;
   $('mindmap').textContent = count === 1 ? 'Карта источника' : 'Ментальная карта';
   $('selection-hint').textContent =
@@ -485,6 +486,12 @@ $('diagram-form').addEventListener('submit', async (event) => {
     (diagram) => { openDiagram(diagram); return diagramCard(diagram); });
 });
 $('map-close').addEventListener('click', closeMap);
+
+$('plan').addEventListener('click', async () => {
+  const [source] = [...state.selected];
+  addMessage(h('div', { class: 'message user' }, source ? `План изучения «${source}»` : 'План изучения блокнота'));
+  await runTask('План изучения', 'Составляю план…', 'study_plan', { source: source ?? null });
+});
 
 $('mindmap').addEventListener('click', async () => {
   const [source] = [...state.selected];
@@ -725,6 +732,8 @@ const KIND_LABELS = {
   summarize: 'конспект',
   compare: 'сравнение',
   mindmap: 'ментальная карта',
+  plan: 'план изучения',
+  'command.plan': 'окно: план изучения',
   diagram: 'схема',
   'command.diagram': 'окно: схема',
   reindex: 'переиндексация',

@@ -96,6 +96,7 @@ export const api = {
       }
       case 'history': return structuredClone(data.history[args.notebookId] ?? []);
       case 'clear_history': data.history[args.notebookId] = []; return null;
+      case 'study_plan': return { ...structuredClone(answer), text: '1. Срок и продление договора [1]\n2. Порядок оплаты [2]\n3. Условия выезда [3]' };
       case 'mind_map': {
         const cite = (n, quote) => ({ n, sourceTitle: 'договор.md', ordinal: n - 1, quote });
         const map = {

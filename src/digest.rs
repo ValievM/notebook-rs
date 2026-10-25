@@ -111,27 +111,59 @@ pub(crate) fn cost(passages: &[Numbered]) -> usize {
         .sum()
 }
 
+const PLAN_TASK: &str = "Составь план изучения этого материала: пронумерованные шаги в том порядке, в котором удобно изучать. У каждого шага одна строка о том, что в нём разобрать, и ссылка [n] на фрагмент с дословной цитатой в citations. Ничего не добавляй от себя.";
+
+const PLAN_MERGE_TASK: &str = "Ниже планы изучения частей одного материала. Объедини их в один пронумерованный план в порядке изучения, без повторов. Сохрани ссылки [n] на фрагменты как есть, ничего не добавляй от себя.";
+
+/// A study plan of the passages: numbered steps in the order to study them, with citations.
+pub fn study_plan(llm: &dyn Llm, passages: &[Passage], budget: &Budget) -> Result<Answer> {
+    if passages.is_empty() {
+        return Ok(nothing("В источниках нечего изучать: плана не будет."));
+    }
+    condensed(
+        llm,
+        &number_from_one(passages),
+        budget,
+        PLAN_TASK,
+        PLAN_MERGE_TASK,
+        "План",
+    )
+}
+
 /// One call if the passages fit, otherwise parts summarized at the same time and merged.
 fn summary_of(llm: &dyn Llm, pool: &[Numbered], budget: &Budget) -> Result<Answer> {
+    condensed(llm, pool, budget, SUMMARY_TASK, SUMMARY_MERGE_TASK, "Часть")
+}
+
+/// The one mechanism behind a summary and a plan: `task` over each part, `merge_task` over what
+/// the parts said (labelled `label` 1, 2...).
+fn condensed(
+    llm: &dyn Llm,
+    pool: &[Numbered],
+    budget: &Budget,
+    task: &str,
+    merge_task: &str,
+    label: &str,
+) -> Result<Answer> {
     if cost(pool) <= budget.chars_per_call {
-        return ask_task(llm, SUMMARY_TASK, pool);
+        return ask_task(llm, task, pool);
     }
     let parts = split_into_parts(pool, budget)?;
-    let summaries = map_ordered(&parts, |part| ask_task(llm, SUMMARY_TASK, part))
+    let summaries = map_ordered(&parts, |part| ask_task(llm, task, part))
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
     let labelled = summaries
         .into_iter()
         .enumerate()
-        .map(|(i, summary)| (format!("Часть {}", i + 1), summary))
+        .map(|(i, summary)| (format!("{label} {}", i + 1), summary))
         .collect();
-    merge_summaries(llm, labelled)
+    merge_summaries(llm, merge_task, labelled)
 }
 
 /// One summary out of the summaries of the parts. The model sees only their texts: the quotes
 /// were checked in the parts, so the merged summary keeps the citations its text refers to.
-fn merge_summaries(llm: &dyn Llm, parts: Vec<(String, Answer)>) -> Result<Answer> {
-    let mut body = format!("{SUMMARY_MERGE_TASK}\n\n");
+fn merge_summaries(llm: &dyn Llm, task: &str, parts: Vec<(String, Answer)>) -> Result<Answer> {
+    let mut body = format!("{task}\n\n");
     let mut known = Vec::new();
     let mut rejected = 0;
     for (label, answer) in parts {
@@ -353,6 +385,45 @@ mod tests {
         let answer = summarize(&llm, &passages("s", 1..=4), &two_passages_per_call()).unwrap();
         let numbers: Vec<usize> = answer.citations.iter().map(|c| c.n).collect();
         assert_eq!(numbers, [1]);
+    }
+
+    #[test]
+    fn a_study_plan_is_asked_for_with_its_own_task_and_merged_like_a_summary() {
+        let llm = Fake::new(|prompt| {
+            if prompt.contains("Ниже планы изучения") {
+                r#"{"answer":"1. Сначала факт [1].\n2. Потом факт [3]."}"#.into()
+            } else {
+                thesis_about_first_passage(prompt)
+            }
+        });
+
+        let answer = study_plan(&llm, &passages("s", 1..=4), &two_passages_per_call()).unwrap();
+
+        let prompts = llm.prompts();
+        assert_eq!(prompts.len(), 3, "two parts and one merge");
+        assert!(
+            prompts
+                .iter()
+                .filter(|p| p.contains("Составь план изучения"))
+                .count()
+                == 2
+        );
+        assert!(prompts.iter().all(|p| !p.contains("Составь конспект")));
+        assert_eq!(answer.text, "1. Сначала факт [1].\n2. Потом факт [3].");
+        let numbers: Vec<usize> = answer.citations.iter().map(|c| c.n).collect();
+        assert_eq!(numbers, [1, 3]);
+    }
+
+    #[test]
+    fn a_short_material_gets_its_plan_in_one_call_and_nothing_gets_a_plain_answer() {
+        let llm = Fake::new(thesis_about_first_passage);
+        study_plan(&llm, &passages("s", 1..=2), &Budget::default()).unwrap();
+        assert_eq!(llm.calls(), 1);
+
+        let none = Fake::never();
+        let answer = study_plan(&none, &[], &Budget::default()).unwrap();
+        assert!(answer.text.contains("нечего"), "{}", answer.text);
+        assert_eq!(none.calls(), 0);
     }
 
     #[test]

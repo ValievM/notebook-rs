@@ -487,6 +487,23 @@ impl Notebooks {
             })
     }
 
+    /// A study plan of one source (or of the whole notebook): steps in the order to study them.
+    pub fn study_plan(&self, notebook: NotebookId, source: Option<&str>) -> Result<Answer> {
+        self.metrics
+            .span("plan")
+            .subject(source.unwrap_or("*"))
+            .run(|_| {
+                let passages = self.passages_of(notebook, source)?;
+                let answer = digest::study_plan(self.llm.as_ref(), &passages, &self.budget)?;
+                let asked = match source {
+                    Some(title) => format!("План изучения «{title}»"),
+                    None => "План изучения блокнота".to_string(),
+                };
+                self.remember(notebook, "plan", &asked, &answer)?;
+                Ok(answer)
+            })
+    }
+
     /// What two sources of the notebook have in common, how they differ, where they contradict.
     pub fn compare(&self, notebook: NotebookId, first: &str, second: &str) -> Result<Answer> {
         self.metrics
@@ -885,6 +902,29 @@ mod tests {
 
         let empty = notebooks.notebook("Пустой").unwrap();
         assert!(notebooks.diagram(empty, "что угодно").is_err());
+    }
+
+    #[test]
+    fn a_study_plan_is_kept_in_the_dialog_as_a_plan_and_not_as_a_conversation() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = chat_notebooks(&prompts);
+
+        let plan = notebooks.study_plan(nb, None).unwrap();
+
+        assert!(!plan.text.is_empty());
+        assert!(prompts.lock().unwrap()[0].contains("Составь план изучения"));
+        let history = notebooks.history(nb).unwrap();
+        assert_eq!(history[0].text, "План изучения блокнота");
+        assert_eq!(history[1].kind, "plan");
+        notebooks.ask(nb, "Какой срок?").unwrap();
+        assert!(
+            !prompts
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .contains("История диалога")
+        );
     }
 
     /// Plan first, then the answer; remembers the prompts.

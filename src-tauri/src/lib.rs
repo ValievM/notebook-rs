@@ -357,6 +357,21 @@ async fn summarize(
 }
 
 #[tauri::command]
+async fn study_plan(
+    engine: State<'_, Engine>,
+    notebook_id: i64,
+    source: Option<String>,
+) -> Result<AnswerDto, String> {
+    let notebooks = engine.get()?;
+    blocking(&engine, Some("command.plan"), source.clone(), move || {
+        Ok(notebooks
+            .study_plan(NotebookId(notebook_id), source.as_deref())?
+            .into())
+    })
+    .await
+}
+
+#[tauri::command]
 async fn mind_map(
     engine: State<'_, Engine>,
     notebook_id: i64,
@@ -538,6 +553,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         summarize,
         compare,
         mind_map,
+        study_plan,
         diagram,
         source_view,
         metrics_summary,
