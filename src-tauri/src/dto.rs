@@ -224,6 +224,7 @@ pub fn user_message(error: &Error) -> String {
                 "Модель ответила так, что ответ не удалось разобрать ({detail}). Повторите запрос."
             )
         }
+        Error::SignIn(detail) => format!("Нужен вход через ChatGPT: {detail}"),
         Error::Source(detail) => format!("Не удалось прочитать источник: {detail}"),
         Error::TooLarge(detail) => format!("Слишком много текста для одного запроса: {detail}"),
         Error::NotFound(detail) => format!("Не найдено: {detail}"),
@@ -308,6 +309,7 @@ mod tests {
                 Error::Source("a.pdf: no text layer".into()),
                 "a.pdf: no text layer",
             ),
+            (Error::SignIn("run nb login".into()), "run nb login"),
             (Error::TooLarge("needs 9 parts".into()), "needs 9 parts"),
             (Error::NotFound("no source".into()), "no source"),
             (Error::Usage("choose two".into()), "choose two"),

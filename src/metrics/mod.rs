@@ -382,6 +382,7 @@ mod tests {
             (Error::ModelUnavailable("x".into()), "model_unavailable"),
             (Error::BadReply("x".into()), "bad_reply"),
             (Error::Source("x".into()), "source"),
+            (Error::SignIn("x".into()), "sign_in"),
             (Error::TooLarge("x".into()), "too_large"),
             (Error::NotFound("x".into()), "not_found"),
             (Error::Usage("x".into()), "usage"),

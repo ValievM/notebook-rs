@@ -8,6 +8,8 @@ pub enum Error {
     ModelUnavailable(String),
     #[error("the model reply cannot be used: {0}")]
     BadReply(String),
+    #[error("sign-in with ChatGPT is needed: {0}")]
+    SignIn(String),
     #[error("cannot read the source: {0}")]
     Source(String),
     #[error("too much text for one request: {0}")]
@@ -28,6 +30,7 @@ impl Error {
             Error::Storage(_) => "storage",
             Error::ModelUnavailable(_) => "model_unavailable",
             Error::BadReply(_) => "bad_reply",
+            Error::SignIn(_) => "sign_in",
             Error::Source(_) => "source",
             Error::TooLarge(_) => "too_large",
             Error::NotFound(_) => "not_found",

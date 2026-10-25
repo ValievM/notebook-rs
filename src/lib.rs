@@ -1,4 +1,5 @@
 pub mod answer;
+pub mod chatgpt;
 pub mod chunk;
 pub mod chunk_markdown;
 pub mod deep;
