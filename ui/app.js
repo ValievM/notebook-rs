@@ -312,6 +312,12 @@ function addMessage(node) {
 /** Runs one request to the model and puts its answer (or its error) into the dialog. */
 async function runTask(kind, waiting, command, args) {
   const pending = addMessage(h('div', { class: 'message pending' }, waiting));
+  // A long answer (a summary of a big notebook takes minutes) must not look like a hang.
+  const startedAt = Date.now();
+  const clock = setInterval(() => {
+    const seconds = Math.floor((Date.now() - startedAt) / 1000);
+    pending.textContent = `${waiting} ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  }, 1000);
   working(1);
   try {
     const answer = await api.invoke(command, { notebookId: state.current, ...args });
@@ -319,6 +325,7 @@ async function runTask(kind, waiting, command, args) {
   } catch (error) {
     pending.replaceWith(h('div', { class: 'message error' }, String(error)));
   } finally {
+    clearInterval(clock);
     working(-1);
     $('messages').scrollTop = $('messages').scrollHeight;
   }

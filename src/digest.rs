@@ -8,7 +8,7 @@
 //! the parts cited (whose quotes were already checked), not the whole text again.
 //! Every citation, at every step, is checked against its passage.
 
-use crate::answer::{Answer, Numbered, ask_task, number_from_one};
+use crate::answer::{Answer, Numbered, ask_merge, ask_task, number_from_one};
 use crate::domain::Passage;
 use crate::error::{Error, Result};
 use crate::llm::Llm;
@@ -31,9 +31,9 @@ impl Default for Budget {
     }
 }
 
-const SUMMARY_TASK: &str = "Составь конспект по этим фрагментам: ключевые тезисы списком, сгруппированные по разделам (названия разделов видны в начале фрагментов). Каждый тезис со ссылкой [n] и дословной цитатой в citations. Ничего не добавляй от себя.";
+const SUMMARY_TASK: &str = "Составь конспект по этим фрагментам: ключевые тезисы списком, сгруппированные по разделам (названия разделов видны в начале фрагментов). Каждый тезис со ссылкой [n] и дословной цитатой в citations: короткой, не длиннее 20 слов. Ничего не добавляй от себя.";
 
-const SUMMARY_MERGE_TASK: &str = "Ниже конспекты частей одного материала. Объедини их в один конспект без повторов, сохрани ссылки [n] на фрагменты и добавь цитаты в citations только из приведённых фрагментов.";
+const SUMMARY_MERGE_TASK: &str = "Ниже конспекты частей одного материала. Объедини их в один конспект без повторов, не длиннее 8000 знаков: убирай мелкие детали, а не разделы. Сохрани ссылки [n] на фрагменты как есть, ничего не добавляй от себя.";
 
 /// A summary of the passages, in the order they are given.
 pub fn summarize(llm: &dyn Llm, passages: &[Passage], budget: &Budget) -> Result<Answer> {
@@ -125,7 +125,21 @@ fn summary_of(llm: &dyn Llm, pool: &[Numbered], budget: &Budget) -> Result<Answe
         .enumerate()
         .map(|(i, summary)| (format!("Часть {}", i + 1), summary))
         .collect();
-    merge(llm, SUMMARY_MERGE_TASK, labelled, pool)
+    merge_summaries(llm, labelled)
+}
+
+/// One summary out of the summaries of the parts. The model sees only their texts: the quotes
+/// were checked in the parts, so the merged summary keeps the citations its text refers to.
+fn merge_summaries(llm: &dyn Llm, parts: Vec<(String, Answer)>) -> Result<Answer> {
+    let mut body = format!("{SUMMARY_MERGE_TASK}\n\n");
+    let mut known = Vec::new();
+    let mut rejected = 0;
+    for (label, answer) in parts {
+        body.push_str(&format!("{label}:\n{}\n\n", answer.text));
+        known.extend(answer.citations);
+        rejected += answer.rejected_quotes;
+    }
+    ask_merge(llm, &body, known, rejected)
 }
 
 /// Cuts the passages into consecutive parts that each fit the budget (a passage bigger than
@@ -283,7 +297,7 @@ mod tests {
     fn long_material_is_summarized_in_parts_with_numbers_of_the_whole_and_merged() {
         let llm = Fake::new(|prompt| {
             if prompt.contains("Ниже конспекты") {
-                r#"{"answer":"Итог [1][3].","citations":[{"n":1,"quote":"Факт номер 1."},{"n":3,"quote":"Факт номер 3."}]}"#.into()
+                r#"{"answer":"Итог [1][3]."}"#.into()
             } else {
                 thesis_about_first_passage(prompt)
             }
@@ -313,14 +327,32 @@ mod tests {
             .find(|p| p.contains("Ниже конспекты"))
             .unwrap();
         assert!(merge.contains("Тезис про 1") && merge.contains("Тезис про 3"));
-        assert!(merge.contains("[1] Источник") && merge.contains("[3] Источник"));
         assert!(
-            !merge.contains("[2] Источник") && !merge.contains("[4] Источник"),
-            "only cited passages"
+            !merge.contains("] Источник"),
+            "the merge works on the summaries; the quotes of the parts were checked already"
         );
         assert_eq!(answer.text, "Итог [1][3].");
-        assert_eq!(answer.citations.len(), 2);
+        let cited: Vec<(usize, &str)> = answer
+            .citations
+            .iter()
+            .map(|c| (c.n, c.quote.as_str()))
+            .collect();
+        assert_eq!(cited, [(1, "Факт номер 1."), (3, "Факт номер 3.")]);
         assert_eq!(answer.rejected_quotes, 2, "one invented quote in each part");
+    }
+
+    #[test]
+    fn a_merged_summary_keeps_only_the_citations_its_text_still_refers_to() {
+        let llm = Fake::new(|prompt| {
+            if prompt.contains("Ниже конспекты") {
+                r#"{"answer":"Итог [1]."}"#.into()
+            } else {
+                thesis_about_first_passage(prompt)
+            }
+        });
+        let answer = summarize(&llm, &passages("s", 1..=4), &two_passages_per_call()).unwrap();
+        let numbers: Vec<usize> = answer.citations.iter().map(|c| c.n).collect();
+        assert_eq!(numbers, [1]);
     }
 
     #[test]

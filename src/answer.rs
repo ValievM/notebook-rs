@@ -91,6 +91,37 @@ fn first_reply(raw: &str) -> Result<Reply> {
     }))
 }
 
+/// Asks the model to merge texts that were already checked: `body` holds them. The model sends
+/// back only the text; its citations are those of `known` that the text still refers to as
+/// `[n]`, so nothing has to be quoted (or sent) again. `rejected_quotes` is carried over.
+pub fn ask_merge(
+    llm: &dyn Llm,
+    body: &str,
+    known: Vec<Citation>,
+    rejected_quotes: usize,
+) -> Result<Answer> {
+    let prompt = format!(
+        "{body}\nОтветь JSON-объектом без пояснений вокруг: {{\"answer\": \"...\"}}. Ссылки [n] оставляй как есть, новых не добавляй.\n"
+    );
+    let reply = first_reply(&llm.complete(&prompt)?)?;
+    let mut citations: Vec<Citation> = Vec::new();
+    for citation in known {
+        let mentioned = reply.answer.contains(&format!("[{}]", citation.n));
+        if mentioned
+            && !citations
+                .iter()
+                .any(|c| (c.n, &c.quote) == (citation.n, &citation.quote))
+        {
+            citations.push(citation);
+        }
+    }
+    Ok(Answer {
+        text: reply.answer,
+        citations,
+        rejected_quotes,
+    })
+}
+
 /// Like `parse`, for passages that carry their own numbers.
 pub fn parse_numbered(raw: &str, passages: &[Numbered]) -> Result<Answer> {
     let reply = first_reply(raw)?;
