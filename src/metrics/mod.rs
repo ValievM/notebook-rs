@@ -222,6 +222,11 @@ impl Span<'_> {
         self
     }
 
+    /// Names the source after the work, when it is only known then.
+    pub fn set_subject(&mut self, subject: &str) {
+        self.subject = Some(subject.to_string());
+    }
+
     /// Adds a number known only after the work (how many results came out).
     pub fn set(&mut self, name: &str, value: i64) {
         self.fields.push((name.to_string(), value));

@@ -29,10 +29,12 @@ impl Llm for InstrumentedLlm {
     fn complete(&self, prompt: &str) -> Result<String> {
         self.metrics
             .span("llm.complete")
-            .subject(&self.inner.describe())
             .field("prompt_chars", prompt.chars().count() as i64)
             .run(|span| {
-                let reply = self.inner.complete(prompt)?;
+                let outcome = self.inner.complete(prompt);
+                // After the call: a model may learn its own name only while it works.
+                span.set_subject(&self.inner.describe());
+                let reply = outcome?;
                 span.set("reply_chars", reply.chars().count() as i64);
                 Ok(reply)
             })
@@ -187,6 +189,34 @@ mod tests {
             llm.describe(),
             "chatgpt:special-model",
             "the wrapper describes what it wraps"
+        );
+    }
+
+    /// Learns its model name only while it works (like the ChatGPT one, which asks the account).
+    struct LearnsItsName(std::sync::Mutex<&'static str>);
+    impl Llm for LearnsItsName {
+        fn complete(&self, _: &str) -> Result<String> {
+            *self.0.lock().unwrap() = "chatgpt:the-model";
+            Ok("x".into())
+        }
+        fn describe(&self) -> String {
+            self.0.lock().unwrap().to_string()
+        }
+    }
+
+    #[test]
+    fn the_model_is_named_by_what_it_is_after_the_call_not_before() {
+        let (metrics, recorder, _) = fixture();
+        let llm = InstrumentedLlm::new(
+            Box::new(LearnsItsName(std::sync::Mutex::new("chatgpt"))),
+            metrics,
+        );
+
+        llm.complete("x").unwrap();
+
+        assert_eq!(
+            only(&recorder).subject.as_deref(),
+            Some("chatgpt:the-model")
         );
     }
 
