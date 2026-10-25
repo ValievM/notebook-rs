@@ -21,18 +21,20 @@ impl VectorRetriever {
 impl Retriever for VectorRetriever {
     fn retrieve(&self, notebook: NotebookId, question: &str, limit: usize) -> Result<Vec<Passage>> {
         let query = self.embedder.embed_query(question)?;
-        let mut scored: Vec<(f32, Passage)> = self
+        let embedded = self
             .store
-            .embedded_passages(notebook, self.embedder.model())?
-            .into_iter()
-            .map(|(passage, vector)| (cosine(&query, &vector), passage))
+            .embedded_passages(notebook, self.embedder.model())?;
+        let mut scored: Vec<(f32, &Passage)> = embedded
+            .iter()
+            .map(|(passage, vector)| (cosine(&query, vector), passage))
             .filter(|(score, _)| *score > 0.0)
             .collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // Only the winners are copied out of the shared cache.
         Ok(scored
             .into_iter()
             .take(limit)
-            .map(|(_, passage)| passage)
+            .map(|(_, passage)| passage.clone())
             .collect())
     }
 }

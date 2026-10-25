@@ -10,6 +10,7 @@ use crate::answer::{self, Answer};
 use crate::domain::NotebookId;
 use crate::error::{Error, Result};
 use crate::llm::Llm;
+use crate::parallel::map_ordered;
 use crate::retrieve::{Retriever, reciprocal_rank_fusion};
 use serde::Deserialize;
 
@@ -74,10 +75,12 @@ pub fn research(
         }],
         Err(other) => return Err(other),
     };
-    let rankings = searches
-        .iter()
-        .map(|search| retriever.retrieve(notebook, &search.term, PASSAGES_PER_SEARCH))
-        .collect::<Result<Vec<_>>>()?;
+    // The searches are independent, so they run at the same time.
+    let rankings = map_ordered(&searches, |search| {
+        retriever.retrieve(notebook, &search.term, PASSAGES_PER_SEARCH)
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
     let mut passages = reciprocal_rank_fusion(rankings);
     passages.truncate(PASSAGES_IN_ANSWER);
     let guidance: Vec<String> = searches
@@ -92,6 +95,7 @@ pub fn research(
 mod tests {
     use super::*;
     use crate::domain::{Passage, PassageId};
+    use crate::parallel::testing::Rendezvous;
     use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
 
@@ -139,6 +143,8 @@ mod tests {
     struct ByTerm {
         found: HashMap<&'static str, Vec<Passage>>,
         asked: Mutex<Vec<String>>,
+        /// When set, a search only succeeds if the other searches run at the same moment.
+        meeting: Option<std::sync::Arc<Rendezvous>>,
     }
 
     impl ByTerm {
@@ -146,7 +152,13 @@ mod tests {
             Self {
                 found: found.into_iter().collect(),
                 asked: Mutex::new(Vec::new()),
+                meeting: None,
             }
+        }
+
+        fn meeting(mut self, rendezvous: std::sync::Arc<Rendezvous>) -> Self {
+            self.meeting = Some(rendezvous);
+            self
         }
 
         fn asked(&self) -> Vec<String> {
@@ -157,6 +169,13 @@ mod tests {
     impl Retriever for ByTerm {
         fn retrieve(&self, _: NotebookId, question: &str, _: usize) -> Result<Vec<Passage>> {
             self.asked.lock().unwrap().push(question.to_string());
+            if let Some(rendezvous) = &self.meeting
+                && !rendezvous.meet()
+            {
+                return Err(Error::ModelUnavailable(
+                    "the searches did not run at the same time".into(),
+                ));
+            }
             Ok(self.found.get(question).cloned().unwrap_or_default())
         }
     }
@@ -267,6 +286,22 @@ mod tests {
         let answer = research(&llm, &retriever, NB, "вопрос").unwrap();
         assert!(answer.text.contains("ничего не нашлось"));
         assert_eq!(llm.calls(), 1);
+    }
+
+    #[test]
+    fn the_planned_searches_run_at_the_same_time_and_keep_the_plan_order() {
+        let llm = Script::new(vec![Ok(TWO_SEARCHES), Ok(r#"{"answer":"ок"}"#)]);
+        let retriever = ByTerm::new(vec![
+            ("срок договора", vec![lease()]),
+            ("оплата", vec![payment()]),
+        ])
+        .meeting(std::sync::Arc::new(Rendezvous::new(2)));
+        research(&llm, &retriever, NB, "вопрос").unwrap();
+        let synthesis = llm.prompt(1);
+        assert!(
+            synthesis.find("Срок действия").unwrap()
+                < synthesis.find("Оплата производится").unwrap()
+        );
     }
 
     #[test]

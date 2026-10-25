@@ -1,6 +1,7 @@
 use super::Retriever;
 use crate::domain::{NotebookId, Passage, PassageId};
 use crate::error::Result;
+use crate::parallel::map_ordered;
 use std::collections::HashMap;
 
 /// A composite: asks several retrievers and fuses their rankings. A passage that several
@@ -20,11 +21,12 @@ const CANDIDATES_PER_RESULT: usize = 3;
 
 impl Retriever for HybridRetriever {
     fn retrieve(&self, notebook: NotebookId, question: &str, limit: usize) -> Result<Vec<Passage>> {
-        let rankings = self
-            .parts
-            .iter()
-            .map(|part| part.retrieve(notebook, question, limit * CANDIDATES_PER_RESULT))
-            .collect::<Result<Vec<_>>>()?;
+        // The parts do not depend on each other, so they search at the same time.
+        let rankings = map_ordered(&self.parts, |part| {
+            part.retrieve(notebook, question, limit * CANDIDATES_PER_RESULT)
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
         let mut fused = reciprocal_rank_fusion(rankings);
         fused.truncate(limit);
         Ok(fused)
@@ -92,6 +94,34 @@ mod tests {
         fn retrieve(&self, _: NotebookId, _: &str, _: usize) -> Result<Vec<Passage>> {
             Ok(self.0.clone())
         }
+    }
+
+    /// Answers only if the other part is searching at the same moment.
+    struct Meeting(
+        std::sync::Arc<crate::parallel::testing::Rendezvous>,
+        Vec<Passage>,
+    );
+    impl Retriever for Meeting {
+        fn retrieve(&self, _: NotebookId, _: &str, _: usize) -> Result<Vec<Passage>> {
+            if self.0.meet() {
+                Ok(self.1.clone())
+            } else {
+                Err(crate::error::Error::ModelUnavailable(
+                    "the parts did not run at the same time".into(),
+                ))
+            }
+        }
+    }
+
+    #[test]
+    fn the_parts_search_at_the_same_time() {
+        let rendezvous = std::sync::Arc::new(crate::parallel::testing::Rendezvous::new(2));
+        let hybrid = HybridRetriever::new(vec![
+            Box::new(Meeting(rendezvous.clone(), vec![p(1)])),
+            Box::new(Meeting(rendezvous, vec![p(2)])),
+        ]);
+        let found = hybrid.retrieve(NotebookId(1), "q", 5).unwrap();
+        assert_eq!(ids(&found), vec![1, 2]);
     }
 
     #[test]
