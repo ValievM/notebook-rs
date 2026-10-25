@@ -7,9 +7,9 @@
 use crate::domain::Passage;
 use crate::error::{Error, Result};
 use crate::llm::Llm;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Citation {
     /// 1-based number of the passage, as in the prompt.
     pub n: usize,
@@ -171,8 +171,66 @@ pub fn prompt(question: &str, passages: &[Passage]) -> String {
     prompt_guided(question, &[], passages)
 }
 
+/// One earlier message of the dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Turn {
+    /// `true` for the person, `false` for the assistant.
+    pub user: bool,
+    pub text: String,
+}
+
+/// How much of the earlier dialog goes into a prompt, and how much of one reply of the assistant.
+pub const HISTORY_BUDGET: usize = 4000;
+pub const REPLY_IN_HISTORY: usize = 600;
+
+fn cut(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(limit).collect();
+    format!("{cut}…")
+}
+
+/// The latest turns that fit the budget, oldest first; empty when there are none. The model
+/// reads it to understand a question like "and in more detail?", not as a source of facts.
+pub fn history_block(turns: &[Turn]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut used = 0;
+    for turn in turns.iter().rev() {
+        let line = if turn.user {
+            format!("Пользователь: {}\n", turn.text)
+        } else {
+            format!("Ассистент: {}\n", cut(&turn.text, REPLY_IN_HISTORY))
+        };
+        let size = line.chars().count();
+        if used + size > HISTORY_BUDGET && !lines.is_empty() {
+            break;
+        }
+        used += size;
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.reverse();
+    format!(
+        "История диалога (она не источник: нужна, чтобы понять вопрос; факты бери только из фрагментов):\n{}\n",
+        lines.concat()
+    )
+}
+
 /// Like `prompt`, with notes on what to look for (the instructions of a deep search plan).
 pub fn prompt_guided(question: &str, guidance: &[String], passages: &[Passage]) -> String {
+    prompt_chat(question, guidance, &[], passages)
+}
+
+/// Like `prompt_guided`, after an earlier dialog.
+pub fn prompt_chat(
+    question: &str,
+    guidance: &[String],
+    history: &[Turn],
+    passages: &[Passage],
+) -> String {
     let mut tail = String::new();
     if !guidance.is_empty() {
         tail.push_str("Что нужно найти и учесть в ответе:\n");
@@ -185,7 +243,10 @@ pub fn prompt_guided(question: &str, guidance: &[String], passages: &[Passage]) 
     // The question is also first: among many passages a question at the end was lost on a model
     // that thinks little ("Вопрос не указан").
     render(
-        &format!("Вопрос (повторён в конце): {question}\n\n"),
+        &format!(
+            "{}Вопрос (повторён в конце): {question}\n\n",
+            history_block(history)
+        ),
         &number_from_one(passages),
         &tail,
     )
@@ -201,6 +262,17 @@ pub fn ask_guided(
     guidance: &[String],
     passages: &[Passage],
 ) -> Result<Answer> {
+    ask_chat(llm, question, guidance, &[], passages)
+}
+
+/// Like `ask_guided`, after an earlier dialog.
+pub fn ask_chat(
+    llm: &dyn Llm,
+    question: &str,
+    guidance: &[String],
+    history: &[Turn],
+    passages: &[Passage],
+) -> Result<Answer> {
     if passages.is_empty() {
         return Ok(Answer {
             text: "В источниках ничего не нашлось по этому вопросу.".into(),
@@ -209,7 +281,7 @@ pub fn ask_guided(
         });
     }
     parse(
-        &llm.complete(&prompt_guided(question, guidance, passages))?,
+        &llm.complete(&prompt_chat(question, guidance, history, passages))?,
         passages,
     )
 }
@@ -306,6 +378,51 @@ mod tests {
             ordinal: 0,
             text: text.into(),
         }
+    }
+
+    fn turn(user: bool, text: &str) -> Turn {
+        Turn {
+            user,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_dialog_so_far_comes_before_the_passages_and_is_not_a_source() {
+        let history = [
+            turn(true, "Какой срок у договора?"),
+            turn(false, "Два года [1]."),
+        ];
+        let text = prompt_chat("А подробнее?", &[], &history, &passages());
+
+        let before_passages = &text[..text.find("[1] Источник").unwrap()];
+        assert!(before_passages.contains("Пользователь: Какой срок у договора?"));
+        assert!(before_passages.contains("Ассистент: Два года [1]."));
+        assert!(before_passages.contains("не источник"));
+        assert!(text.contains("Вопрос: А подробнее?"));
+    }
+
+    #[test]
+    fn a_long_dialog_keeps_the_latest_turns_and_cuts_long_replies() {
+        let filler = "я".repeat(900);
+        let mut history = Vec::new();
+        for n in 1..=8 {
+            history.push(turn(true, &format!("вопрос номер {n} {filler}")));
+        }
+        history.push(turn(false, &"ы".repeat(5000)));
+        let block = history_block(&history);
+
+        assert!(block.contains("вопрос номер 8"), "the latest turns stay");
+        assert!(!block.contains("вопрос номер 1 "), "the oldest are dropped");
+        assert!(block.chars().count() < HISTORY_BUDGET + 300);
+        assert!(block.contains(&"ы".repeat(REPLY_IN_HISTORY)));
+        assert!(!block.contains(&"ы".repeat(REPLY_IN_HISTORY + 1)));
+    }
+
+    #[test]
+    fn without_a_dialog_there_is_no_dialog_block() {
+        assert_eq!(history_block(&[]), "");
+        assert!(!prompt("Вопрос?", &passages()).contains("История диалога"));
     }
 
     #[test]

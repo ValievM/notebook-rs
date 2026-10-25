@@ -1,7 +1,7 @@
 //! The facade the binary (and later the window) talks to. It owns the wiring: how a source is
 //! split and embedded on the way in, and how a question is searched and answered on the way out.
 
-use crate::answer::{self, Answer};
+use crate::answer::{self, Answer, Citation, Turn};
 use crate::chunk::Chunker;
 use crate::chunk_markdown::MarkdownChunker;
 use crate::deep;
@@ -17,6 +17,32 @@ use crate::view::{PassageView, source_view};
 use std::sync::Arc;
 
 const PASSAGES_PER_QUESTION: usize = 6;
+
+/// How many earlier messages are looked at to build the dialog of a question, and how many are
+/// shown in the window.
+const HISTORY_LOOKBACK: usize = 12;
+const HISTORY_SHOWN: usize = 200;
+/// A follow-up this short ("and in more detail?") says nothing the search could use alone.
+const SHORT_FOLLOW_UP_CHARS: usize = 60;
+
+/// One message of the dialog of a notebook, as the window shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryEntry {
+    pub id: i64,
+    /// `true` for the person, `false` for the assistant.
+    pub user: bool,
+    /// `ask`, `summarize` or `compare`.
+    pub kind: String,
+    pub text: String,
+    pub citations: Vec<Citation>,
+    pub rejected_quotes: usize,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct AnswerPayload {
+    citations: Vec<Citation>,
+    rejected_quotes: usize,
+}
 
 /// How many passages go to the embedding model in one call. A bound on what is held and
 /// computed at once, so that a long source is indexed in steps. (Measured: the memory of the
@@ -156,11 +182,76 @@ impl Notebooks {
             .span("ask")
             .field("question_chars", question.chars().count() as i64)
             .run(|_| {
-                let passages =
-                    self.retriever
-                        .retrieve(notebook, question, PASSAGES_PER_QUESTION)?;
-                answer::ask(self.llm.as_ref(), question, &passages)
+                let turns = self.earlier_turns(notebook)?;
+                let passages = self.retriever.retrieve(
+                    notebook,
+                    &search_text(question, &turns),
+                    PASSAGES_PER_QUESTION,
+                )?;
+                let answer = answer::ask_chat(self.llm.as_ref(), question, &[], &turns, &passages)?;
+                self.remember(notebook, "ask", question, &answer)?;
+                Ok(answer)
             })
+    }
+
+    /// The earlier questions and answers of the dialog, for the next question. Summaries and
+    /// comparisons are in the dialog for the person but are not a conversation to continue.
+    fn earlier_turns(&self, notebook: NotebookId) -> Result<Vec<Turn>> {
+        Ok(self
+            .store
+            .messages(notebook, HISTORY_LOOKBACK)?
+            .into_iter()
+            .filter(|m| m.kind == "ask")
+            .map(|m| Turn {
+                user: m.role == "user",
+                text: m.text,
+            })
+            .collect())
+    }
+
+    /// Keeps a question and its answer in the dialog of the notebook.
+    fn remember(
+        &self,
+        notebook: NotebookId,
+        kind: &str,
+        question: &str,
+        answer: &Answer,
+    ) -> Result<()> {
+        let payload = serde_json::to_string(&AnswerPayload {
+            citations: answer.citations.clone(),
+            rejected_quotes: answer.rejected_quotes,
+        })
+        .unwrap_or_default();
+        self.store
+            .add_message(notebook, "user", kind, question, "")?;
+        self.store
+            .add_message(notebook, "assistant", kind, &answer.text, &payload)?;
+        Ok(())
+    }
+
+    /// The dialog of the notebook, oldest first.
+    pub fn history(&self, notebook: NotebookId) -> Result<Vec<HistoryEntry>> {
+        Ok(self
+            .store
+            .messages(notebook, HISTORY_SHOWN)?
+            .into_iter()
+            .map(|m| {
+                let payload: AnswerPayload = serde_json::from_str(&m.payload).unwrap_or_default();
+                HistoryEntry {
+                    id: m.id,
+                    user: m.role == "user",
+                    kind: m.kind,
+                    text: m.text,
+                    citations: payload.citations,
+                    rejected_quotes: payload.rejected_quotes,
+                }
+            })
+            .collect())
+    }
+
+    /// Forgets the dialog of the notebook; the sources stay.
+    pub fn clear_history(&self, notebook: NotebookId) -> Result<()> {
+        self.store.clear_messages(notebook)
     }
 
     /// The passages of a source (or of the whole notebook) in reading order; an unknown title is
@@ -214,7 +305,13 @@ impl Notebooks {
             .subject(source.unwrap_or("*"))
             .run(|_| {
                 let passages = self.passages_of(notebook, source)?;
-                digest::summarize(self.llm.as_ref(), &passages, &self.budget)
+                let answer = digest::summarize(self.llm.as_ref(), &passages, &self.budget)?;
+                let asked = match source {
+                    Some(title) => format!("Конспект «{title}»"),
+                    None => "Конспект блокнота".to_string(),
+                };
+                self.remember(notebook, "summarize", &asked, &answer)?;
+                Ok(answer)
             })
     }
 
@@ -231,7 +328,14 @@ impl Notebooks {
                 }
                 let first = self.passages_of(notebook, Some(first))?;
                 let second = self.passages_of(notebook, Some(second))?;
-                digest::compare(self.llm.as_ref(), &first, &second, &self.budget)
+                let answer = digest::compare(self.llm.as_ref(), &first, &second, &self.budget)?;
+                let asked = format!(
+                    "Сравнить «{}» и «{}»",
+                    first.first().map_or("", |p| p.source_title.as_str()),
+                    second.first().map_or("", |p| p.source_title.as_str())
+                );
+                self.remember(notebook, "compare", &asked, &answer)?;
+                Ok(answer)
             })
     }
 
@@ -242,13 +346,27 @@ impl Notebooks {
             .span("ask_deep")
             .field("question_chars", question.chars().count() as i64)
             .run(|_| {
-                deep::research(
+                let answer = deep::research(
                     self.llm.as_ref(),
                     self.retriever.as_ref(),
                     notebook,
                     question,
-                )
+                )?;
+                self.remember(notebook, "ask", question, &answer)?;
+                Ok(answer)
             })
+    }
+}
+
+/// What to search for: a short follow-up is searched together with the previous question, so
+/// that "and in more detail?" still finds the passages of the topic.
+fn search_text(question: &str, turns: &[Turn]) -> String {
+    let previous = turns.iter().rev().find(|turn| turn.user);
+    match previous {
+        Some(turn) if question.chars().count() <= SHORT_FOLLOW_UP_CHARS => {
+            format!("{} {question}", turn.text)
+        }
+        _ => question.to_string(),
     }
 }
 
@@ -301,6 +419,110 @@ mod tests {
         let prompt = prompts.lock().unwrap()[0].clone();
         assert!(prompt.contains("договор.txt"));
         assert!(!prompt.contains("молоко"));
+    }
+
+    fn chat_notebooks(prompts: &Arc<Mutex<Vec<String>>>) -> (Notebooks, NotebookId) {
+        let llm = Recording {
+            reply: r#"{"answer":"Два года [1].","citations":[{"n":1,"quote":"два года"}]}"#,
+            prompts: prompts.clone(),
+        };
+        let notebooks = Notebooks::standard(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(llm),
+        );
+        let nb = notebooks.notebook("Диплом").unwrap();
+        notebooks
+            .add_source(
+                nb,
+                "договор.txt",
+                "Срок действия договора составляет два года.",
+            )
+            .unwrap();
+        notebooks
+            .add_source(nb, "заметки.txt", "Купить молоко и хлеб.")
+            .unwrap();
+        (notebooks, nb)
+    }
+
+    #[test]
+    fn a_follow_up_sees_the_earlier_turns_and_the_dialog_is_kept_with_its_citations() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = chat_notebooks(&prompts);
+
+        notebooks.ask(nb, "Какой срок у договора?").unwrap();
+        notebooks.ask(nb, "А подробнее?").unwrap();
+
+        let second = prompts.lock().unwrap()[1].clone();
+        assert!(
+            second.contains("Пользователь: Какой срок у договора?"),
+            "{second}"
+        );
+        assert!(second.contains("Ассистент: Два года [1]."), "{second}");
+        let first = prompts.lock().unwrap()[0].clone();
+        assert!(!first.contains("История диалога"));
+
+        let history = notebooks.history(nb).unwrap();
+        let shape: Vec<(bool, &str)> = history.iter().map(|m| (m.user, m.text.as_str())).collect();
+        assert_eq!(
+            shape,
+            [
+                (true, "Какой срок у договора?"),
+                (false, "Два года [1]."),
+                (true, "А подробнее?"),
+                (false, "Два года [1].")
+            ]
+        );
+        assert_eq!(history[1].citations.len(), 1);
+        assert_eq!(history[1].citations[0].source_title, "договор.txt");
+    }
+
+    #[test]
+    fn a_short_follow_up_is_searched_together_with_the_previous_question() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = chat_notebooks(&prompts);
+        notebooks.ask(nb, "Какой срок у договора?").unwrap();
+
+        notebooks.ask(nb, "А подробнее?").unwrap();
+
+        let second = prompts.lock().unwrap()[1].clone();
+        assert!(second.contains("[1] Источник «договор.txt»"), "{second}");
+    }
+
+    #[test]
+    fn clearing_the_dialog_makes_the_next_question_start_fresh() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = chat_notebooks(&prompts);
+        notebooks.ask(nb, "Какой срок у договора?").unwrap();
+
+        notebooks.clear_history(nb).unwrap();
+        notebooks.ask(nb, "Какой срок у договора?").unwrap();
+
+        assert!(notebooks.history(nb).unwrap().len() == 2);
+        assert!(!prompts.lock().unwrap()[1].contains("История диалога"));
+    }
+
+    #[test]
+    fn a_summary_and_a_comparison_are_kept_in_the_dialog_but_do_not_enter_later_questions() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = chat_notebooks(&prompts);
+
+        notebooks.summarize(nb, None).unwrap();
+        notebooks.compare(nb, "договор.txt", "заметки.txt").unwrap();
+        notebooks.ask(nb, "Какой срок у договора?").unwrap();
+
+        let kinds: Vec<String> = notebooks
+            .history(nb)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            ["summarize", "summarize", "compare", "compare", "ask", "ask"]
+        );
+        let last = prompts.lock().unwrap().last().unwrap().clone();
+        assert!(!last.contains("История диалога"), "{last}");
     }
 
     /// Plan first, then the answer; remembers the prompts.

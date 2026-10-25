@@ -23,6 +23,19 @@ pub struct NotebookInfo {
     pub sources: usize,
 }
 
+/// One message of the dialog of a notebook, as it was kept. `payload` is opaque text for the
+/// caller (the citations of an answer, a map...): this module only keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMessage {
+    pub id: i64,
+    /// `user` or `assistant`.
+    pub role: String,
+    /// What it was: `ask`, `summarize`, `compare`...
+    pub kind: String,
+    pub text: String,
+    pub payload: String,
+}
+
 /// A source with the number of its passages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInfo {
@@ -78,6 +91,14 @@ impl Store {
                source_id INTEGER NOT NULL REFERENCES source(id),
                ordinal INTEGER NOT NULL,
                text TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS message (
+               id INTEGER PRIMARY KEY,
+               notebook_id INTEGER NOT NULL REFERENCES notebook(id),
+               role TEXT NOT NULL,
+               kind TEXT NOT NULL,
+               text TEXT NOT NULL,
+               payload TEXT NOT NULL DEFAULT '');
+             CREATE INDEX IF NOT EXISTS message_by_notebook ON message(notebook_id, id);
              CREATE VIRTUAL TABLE IF NOT EXISTS passage_index USING fts5(
                text, content='passage', content_rowid='id', tokenize='unicode61 remove_diacritics 2');",
         )?;
@@ -221,6 +242,51 @@ impl Store {
             self.forget_vectors();
         }
         Ok(removed)
+    }
+
+    /// Appends a message to the dialog of the notebook.
+    pub fn add_message(
+        &self,
+        notebook: NotebookId,
+        role: &str,
+        kind: &str,
+        text: &str,
+        payload: &str,
+    ) -> Result<i64> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO message(notebook_id, role, kind, text, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![notebook.0, role, kind, text, payload],
+        )?;
+        Ok(db.last_insert_rowid())
+    }
+
+    /// The last `limit` messages of the notebook, oldest first.
+    pub fn messages(&self, notebook: NotebookId, limit: usize) -> Result<Vec<StoredMessage>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT id, role, kind, text, payload FROM message
+             WHERE notebook_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![notebook.0, limit as i64], |r| {
+            Ok(StoredMessage {
+                id: r.get(0)?,
+                role: r.get(1)?,
+                kind: r.get(2)?,
+                text: r.get(3)?,
+                payload: r.get(4)?,
+            })
+        })?;
+        let mut messages: Vec<StoredMessage> = rows.collect::<std::result::Result<_, _>>()?;
+        messages.reverse();
+        Ok(messages)
+    }
+
+    /// Forgets the dialog of the notebook (other notebooks keep theirs).
+    pub fn clear_messages(&self, notebook: NotebookId) -> Result<()> {
+        self.db()
+            .execute("DELETE FROM message WHERE notebook_id = ?1", [notebook.0])?;
+        Ok(())
     }
 
     pub fn source_count(&self, notebook: NotebookId) -> Result<usize> {
@@ -396,6 +462,32 @@ mod tests {
             text: text.into(),
             embedding,
         }
+    }
+
+    #[test]
+    fn a_dialog_is_kept_per_notebook_in_order_and_the_last_messages_are_returned() {
+        let store = Store::in_memory().unwrap();
+        let a = store.create_notebook("a").unwrap();
+        let b = store.create_notebook("b").unwrap();
+        store.add_message(a, "user", "ask", "первый", "").unwrap();
+        store
+            .add_message(a, "assistant", "ask", "ответ", r#"{"x":1}"#)
+            .unwrap();
+        store.add_message(a, "user", "ask", "второй", "").unwrap();
+        store.add_message(b, "user", "ask", "чужой", "").unwrap();
+
+        let last_two = store.messages(a, 2).unwrap();
+        let texts: Vec<&str> = last_two.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["ответ", "второй"]);
+        assert_eq!(last_two[0].payload, r#"{"x":1}"#);
+        assert_eq!(
+            (last_two[0].role.as_str(), last_two[0].kind.as_str()),
+            ("assistant", "ask")
+        );
+
+        store.clear_messages(a).unwrap();
+        assert!(store.messages(a, 10).unwrap().is_empty());
+        assert_eq!(store.messages(b, 10).unwrap().len(), 1);
     }
 
     #[test]
