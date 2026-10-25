@@ -264,7 +264,7 @@ body { display: flex; flex-direction: column; }
 .check { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 
 /* Mind map */
-.mindmap-view { width: min(1100px, 96vw); }
+.viewer.wide.mindmap-view { width: min(1100px, 96vw); }
 .mindmap-body { flex: 1; overflow: auto; padding: 8px 16px 24px; }
 .mindmap-tools { display: flex; gap: 6px; margin-bottom: 8px; }
 .mindmap-canvas svg { display: block; }

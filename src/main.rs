@@ -88,6 +88,8 @@ enum Command {
         #[arg(long)]
         source: Option<String>,
     },
+    /// A diagram (boxes and arrows) of a topic, as text (the window draws it)
+    Diagram { notebook: String, topic: String },
     /// Cut the sources of a notebook again and embed them again (after the way of cutting or
     /// the embedding model changed)
     Reindex { notebook: String },
@@ -227,6 +229,22 @@ fn main() -> Result<()> {
                     "\n(цитат узлов, которых нет в источниках, отброшено: {})",
                     map.rejected_quotes
                 );
+            }
+        }
+        Command::Diagram { notebook, topic } => {
+            let id = notebooks.notebook(&notebook)?;
+            let drawn = notebooks.diagram(id, &topic)?;
+            println!("{}", drawn.title);
+            for node in &drawn.nodes {
+                let mark = node
+                    .cite
+                    .as_ref()
+                    .map_or(String::new(), |c| format!("  [{}] {}", c.n, c.source_title));
+                println!("  ({}) {}{mark}", node.id, node.label);
+            }
+            for edge in &drawn.edges {
+                let label = edge.label.as_deref().unwrap_or("");
+                println!("  {} -> {} {label}", edge.from, edge.to);
             }
         }
         Command::Reindex { notebook } => {

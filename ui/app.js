@@ -4,6 +4,7 @@
 // can say anything). It is only ever put into the page as text nodes, never as HTML.
 
 import { renderMindMap } from './mindmap.js';
+import { renderDiagram } from './diagram.js';
 
 const api = await loadApi();
 
@@ -83,7 +84,7 @@ function banner(message, kind = 'info') {
 function working(delta) {
   state.working += delta;
   const busy = state.working > 0 || !state.ready;
-  for (const id of ['send', 'summarize', 'compare', 'mindmap', 'pick-files', 'pick-folder']) $(id).disabled = busy;
+  for (const id of ['send', 'summarize', 'compare', 'mindmap', 'diagram', 'diagram-go', 'pick-files', 'pick-folder']) $(id).disabled = busy;
   if (!busy) renderSelection();
 }
 
@@ -137,6 +138,7 @@ async function loadHistory(id) {
       addMessage(entry.user
         ? h('div', { class: 'message user' }, entry.text)
         : entry.mindMap ? mapCard(entry.mindMap)
+        : entry.diagram ? diagramCard(entry.diagram)
         : answerMessage(ANSWER_KINDS[entry.kind] ?? 'Ответ', entry));
     }
   } catch (error) { toast(String(error), 'error'); }
@@ -259,6 +261,7 @@ function renderSelection() {
   $('summarize').disabled = busy || !hasNotebook || count > 1;
   $('compare').disabled = busy || count !== 2;
   $('mindmap').disabled = busy || !hasNotebook || count > 1;
+  $('diagram').disabled = busy || !hasNotebook;
   $('mindmap').textContent = count === 1 ? 'Карта источника' : 'Ментальная карта';
   $('selection-hint').textContent =
     count === 0 ? 'Отметьте источники галочками: один для конспекта, два для сравнения.'
@@ -438,11 +441,49 @@ function openMap(map) {
   $('map-note').textContent = map.rejectedQuotes > 0
     ? `У ${map.rejectedQuotes} узлов цитаты не нашлись в источниках: ссылки на них убраны. Узлы с жирной рамкой открывают место в источнике.`
     : 'Узлы с жирной рамкой открывают место в источнике. Кружок справа сворачивает ветку.';
-  renderMindMap($('map-body'), map, { onCite: (citation) => { closeMap(); openCitation(citation); } });
   $('map-view').hidden = false;
+  renderMindMap($('map-body'), map, { onCite: (citation) => { closeMap(); openCitation(citation); } });
 }
 
 function closeMap() { $('map-view').hidden = true; }
+
+// ---------- diagram ----------
+
+function diagramCard(diagram) {
+  return h('div', { class: 'message assistant' },
+    h('div', { class: 'kind' }, 'Схема'),
+    h('div', { class: 'map-card' },
+      h('span', {}, `${diagram.title} · блоков: ${diagram.nodes.length}`),
+      h('button', { type: 'button', onclick: () => openDiagram(diagram) }, 'Открыть')));
+}
+
+function openDiagram(diagram) {
+  closeViewer();
+  closeMetrics();
+  closeSettings();
+  $('map-title').textContent = `Схема: ${diagram.title}`;
+  $('map-note').textContent = diagram.rejectedQuotes > 0
+    ? `У ${diagram.rejectedQuotes} блоков цитаты не нашлись в источниках: ссылки на них убраны. Блоки с жирной рамкой открывают место в источнике.`
+    : 'Блоки с жирной рамкой открывают место в источнике.';
+  $('map-view').hidden = false;
+  renderDiagram($('map-body'), diagram, { onCite: (citation) => { closeMap(); openCitation(citation); } });
+}
+
+$('diagram').addEventListener('click', () => {
+  $('diagram-form').hidden = !$('diagram-form').hidden;
+  if (!$('diagram-form').hidden) $('diagram-topic').focus();
+});
+
+$('diagram-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const topic = $('diagram-topic').value.trim();
+  if (!topic || state.working > 0 || !state.ready) return;
+  $('diagram-topic').value = '';
+  $('diagram-form').hidden = true;
+  addMessage(h('div', { class: 'message user' }, `Схема: ${topic}`));
+  await runTask('Схема', 'Рисую схему…', 'diagram', { topic },
+    (diagram) => { openDiagram(diagram); return diagramCard(diagram); });
+});
 $('map-close').addEventListener('click', closeMap);
 
 $('mindmap').addEventListener('click', async () => {
@@ -684,6 +725,8 @@ const KIND_LABELS = {
   summarize: 'конспект',
   compare: 'сравнение',
   mindmap: 'ментальная карта',
+  diagram: 'схема',
+  'command.diagram': 'окно: схема',
   reindex: 'переиндексация',
   'command.mindmap': 'окно: ментальная карта',
   'llm.complete': 'вызов модели',

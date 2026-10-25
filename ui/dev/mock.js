@@ -120,6 +120,28 @@ export const api = {
         list.push({ id: list.length + 1, user: false, kind: 'mindmap', text: map.root.title, citations: [], rejectedQuotes: 0, mindMap: map });
         return map;
       }
+      case 'diagram': {
+        const cite = { n: 1, sourceTitle: 'договор.md', ordinal: 0, quote: 'Срок действия договора составляет два года' };
+        const drawn = {
+          title: args.topic, rejectedQuotes: 0,
+          nodes: [
+            { id: 'a', label: 'Подписание договора', cite: null },
+            { id: 'b', label: 'Срок действия два года', cite },
+            { id: 'c', label: 'Предупреждение за тридцать дней до конца срока', cite: null },
+            { id: 'd', label: 'Продление по соглашению сторон', cite: null },
+            { id: 'e', label: 'Освобождение помещения', cite: null },
+          ],
+          edges: [
+            { from: 'a', to: 'b', label: 'начало' }, { from: 'b', to: 'c', label: null },
+            { from: 'c', to: 'd', label: 'если согласны' }, { from: 'c', to: 'e', label: 'если нет' },
+            { from: 'd', to: 'b', label: 'новый срок' },
+          ],
+        };
+        const list = (data.history[args.notebookId] ??= []);
+        list.push({ id: list.length + 1, user: true, kind: 'diagram', text: `Схема: ${args.topic}`, citations: [], rejectedQuotes: 0 });
+        list.push({ id: list.length + 1, user: false, kind: 'diagram', text: drawn.title, citations: [], rejectedQuotes: 0, diagram: drawn });
+        return drawn;
+      }
       case 'ask': {
         const list = (data.history[args.notebookId] ??= []);
         list.push({ id: list.length + 1, user: true, kind: 'ask', text: args.question, citations: [], rejectedQuotes: 0 });

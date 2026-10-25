@@ -1019,6 +1019,53 @@ mod ipc_tests {
         assert_eq!(history[1]["mindMap"]["root"]["title"], "Договор");
     }
 
+    struct Boxes;
+    impl Llm for Boxes {
+        fn complete(&self, _prompt: &str) -> NotebookResult<String> {
+            Ok(r#"{"title":"Срок","nodes":[{"id":"a","label":"Подписание"},{"id":"b","label":"Два года","n":1,"quote":"два года"}],"edges":[{"from":"a","to":"b","label":"затем"}]}"#.into())
+        }
+    }
+
+    #[test]
+    fn a_diagram_comes_to_the_page_and_an_empty_topic_is_refused_in_russian() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::with_telemetry(Telemetry::open(&directory.path().join("metrics.db")));
+        let notebooks = Notebooks::standard_with_metrics(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(Boxes),
+            engine.telemetry.metrics.clone(),
+        );
+        engine.slot.set(Ok(Arc::new(notebooks))).ok();
+        let window = window(engine);
+        let id = call(&window, "create_notebook", json!({"name": "n"})).unwrap()["id"].clone();
+        let file = directory.path().join("договор.txt");
+        std::fs::write(&file, "Срок действия договора составляет два года.").unwrap();
+        call(
+            &window,
+            "add_source",
+            json!({"notebookId": id, "location": file.to_str().unwrap()}),
+        )
+        .unwrap();
+
+        let drawn = call(
+            &window,
+            "diagram",
+            json!({"notebookId": id, "topic": "срок договора"}),
+        )
+        .unwrap();
+
+        assert_eq!(drawn["title"], "Срок");
+        assert_eq!(drawn["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(drawn["nodes"][1]["cite"]["sourceTitle"], "договор.txt");
+        assert_eq!(drawn["edges"][0]["label"], "затем");
+        let history = call(&window, "history", json!({"notebookId": id})).unwrap();
+        assert_eq!(history[1]["diagram"]["title"], "Срок");
+
+        let error = call(&window, "diagram", json!({"notebookId": id, "topic": "  "})).unwrap_err();
+        assert!(error.as_str().unwrap().contains("Напишите"), "{error}");
+    }
+
     #[test]
     fn the_dialog_of_a_notebook_comes_back_to_the_page_and_can_be_cleared() {
         let directory = tempfile::tempdir().unwrap();

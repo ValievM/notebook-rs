@@ -1,19 +1,13 @@
 // Draws a mind map as a horizontal tree in SVG: the root on the left, branches to the right,
 // curved links. No libraries. Titles come from the model and are only ever set as text.
 
-const NS = 'http://www.w3.org/2000/svg';
+import { el, iconButton, toolbar } from './svg.js';
+
 const ROW = 36;           // vertical room of one leaf
 const GAP = 56;           // horizontal gap between columns
 const PAD = 24;
 const CHAR = 7.4;         // average width of one character at 13px
 const BRANCH_COLORS = ['#4f7cff', '#2fb67c', '#e0912f', '#c05bd6', '#e0566b', '#2fb3c9'];
-
-function el(name, attrs = {}, ...children) {
-  const node = document.createElementNS(NS, name);
-  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
-  for (const child of children) node.append(child);
-  return node;
-}
 
 function textWidth(title) {
   return Math.min(300, Math.max(60, title.length * CHAR + 28));
@@ -60,11 +54,17 @@ export function layout(root, collapsed) {
 export function renderMindMap(container, map, { onCite }) {
   const collapsed = new Set();
   let scale = 1;
+  let fitted = false;
   const holder = document.createElement('div');
   holder.className = 'mindmap-canvas';
 
   function draw() {
     const { placed, links, width, height } = layout(map.root, collapsed);
+    if (!fitted) {
+      // Opens fitted to the width of the panel (the panel must be visible to know it).
+      scale = Math.min(1, Math.max(0.4, ((container.clientWidth || 1000) - 32) / width));
+      fitted = true;
+    }
     const svg = el('svg', {
       width: width * scale, height: height * scale, viewBox: `0 0 ${width} ${height}`,
       role: 'img', 'aria-label': `Ментальная карта: ${map.root.title}`,
@@ -121,26 +121,15 @@ export function renderMindMap(container, map, { onCite }) {
     holder.replaceChildren(svg);
   }
 
-  const button = (label, text, action) => {
-    const node = document.createElement('button');
-    node.type = 'button';
-    node.className = 'icon';
-    node.setAttribute('aria-label', label);
-    node.textContent = text;
-    node.addEventListener('click', action);
-    return node;
-  };
-  const tools = document.createElement('div');
-  tools.className = 'mindmap-tools';
-  tools.append(
-    button('Увеличить', '+', () => { scale = Math.min(2.5, scale + 0.2); draw(); }),
-    button('Уменьшить', '−', () => { scale = Math.max(0.4, scale - 0.2); draw(); }),
-    button('Свернуть до первого уровня', '⇤', () => {
+  const tools = toolbar(
+    iconButton('Увеличить', '+', () => { scale = Math.min(2.5, scale + 0.2); draw(); }),
+    iconButton('Уменьшить', '−', () => { scale = Math.max(0.4, scale - 0.2); draw(); }),
+    iconButton('Свернуть до первого уровня', '⇤', () => {
       collapsed.clear();
       for (const child of map.root.children) if (child.children.length) collapsed.add(child);
       draw();
     }),
-    button('Развернуть всё', '⇥', () => { collapsed.clear(); draw(); }),
+    iconButton('Развернуть всё', '⇥', () => { collapsed.clear(); draw(); }),
   );
   container.replaceChildren(tools, holder);
   draw();
