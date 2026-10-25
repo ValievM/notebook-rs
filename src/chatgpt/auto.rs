@@ -32,6 +32,14 @@ impl AutoLlm {
 }
 
 impl Llm for AutoLlm {
+    fn describe(&self) -> String {
+        if self.tokens.is_signed_in() {
+            self.chatgpt.describe()
+        } else {
+            self.fallback.describe()
+        }
+    }
+
     fn complete(&self, prompt: &str) -> Result<String> {
         if self.tokens.is_signed_in() {
             self.chatgpt.complete(prompt)
@@ -68,6 +76,9 @@ mod tests {
         fn complete(&self, _: &str) -> Result<String> {
             Ok("from codex".into())
         }
+        fn describe(&self) -> String {
+            "codex".into()
+        }
     }
 
     fn fixture(signed_in: bool) -> (AutoLlm, Arc<SwitchableStore>, FakeServer) {
@@ -100,6 +111,16 @@ mod tests {
         assert_eq!(llm.active(), "chatgpt");
         assert_eq!(llm.complete("x").unwrap(), "from chatgpt");
         assert_eq!(api.requests().len(), 1);
+    }
+
+    #[test]
+    fn it_describes_whoever_answers_now() {
+        let (llm, store, _api) = fixture(false);
+        assert_eq!(llm.describe(), "codex");
+
+        store.save(&sample(10_000_000)).unwrap();
+
+        assert_eq!(llm.describe(), "chatgpt:m");
     }
 
     #[test]

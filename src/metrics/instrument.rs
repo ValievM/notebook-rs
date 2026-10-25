@@ -22,9 +22,14 @@ impl InstrumentedLlm {
 }
 
 impl Llm for InstrumentedLlm {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+
     fn complete(&self, prompt: &str) -> Result<String> {
         self.metrics
             .span("llm.complete")
+            .subject(&self.inner.describe())
             .field("prompt_chars", prompt.chars().count() as i64)
             .run(|span| {
                 let reply = self.inner.complete(prompt)?;
@@ -155,6 +160,34 @@ mod tests {
         assert_eq!(field(&event, "prompt_chars"), Some(6));
         assert_eq!(field(&event, "reply_chars"), Some(6));
         assert!(event.ok);
+    }
+
+    struct Named;
+    impl Llm for Named {
+        fn complete(&self, _: &str) -> Result<String> {
+            Ok("x".into())
+        }
+        fn describe(&self) -> String {
+            "chatgpt:special-model".into()
+        }
+    }
+
+    #[test]
+    fn a_model_call_is_measured_by_the_model_that_answered() {
+        let (metrics, recorder, _) = fixture();
+        let llm = InstrumentedLlm::new(Box::new(Named), metrics);
+
+        llm.complete("x").unwrap();
+
+        assert_eq!(
+            only(&recorder).subject.as_deref(),
+            Some("chatgpt:special-model")
+        );
+        assert_eq!(
+            llm.describe(),
+            "chatgpt:special-model",
+            "the wrapper describes what it wraps"
+        );
     }
 
     #[test]

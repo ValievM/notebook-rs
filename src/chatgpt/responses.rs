@@ -73,6 +73,13 @@ impl ChatGptLlm {
 const LOCK: &str = "the model lock is never held across a panic";
 
 impl Llm for ChatGptLlm {
+    fn describe(&self) -> String {
+        match self.model_name() {
+            Some(model) => format!("chatgpt:{model}"),
+            None => "chatgpt".to_string(),
+        }
+    }
+
     fn complete(&self, prompt: &str) -> Result<String> {
         let model = self.resolve_model()?;
         let body = request_body(&model, prompt, self.reasoning_effort.as_deref());
@@ -404,6 +411,14 @@ mod tests {
             serde_json::json!([{"role": "user", "content": "Какой срок?"}])
         );
         assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn it_describes_itself_by_its_model_once_the_model_is_known() {
+        let server = FakeServer::start(|_| stream_of(&["ок"]));
+        assert_eq!(client(&server).describe(), "chatgpt:test-model");
+        let unknown = ChatGptLlm::new(signed_in()).with_base_url(&server.url);
+        assert_eq!(unknown.describe(), "chatgpt");
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! This is a port of the sign-in that the owner's family-expense bot used before it was
 //! removed from that project (see DECISIONS D-16).
 
+mod account;
 mod auto;
 mod credentials;
 mod login;
@@ -20,6 +21,7 @@ mod token_source;
 #[cfg(test)]
 mod testing;
 
+pub use account::ChatGptAccount;
 pub use auto::AutoLlm;
 pub use credentials::Credentials;
 pub use login::{DEFAULT_PORT, LoginOptions, login, open_in_browser};

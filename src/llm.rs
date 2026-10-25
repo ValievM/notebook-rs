@@ -8,6 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub trait Llm: Send + Sync {
     /// One prompt in, the model's final message out.
     fn complete(&self, prompt: &str) -> Result<String>;
+
+    /// Who answers, for the measurements: `codex`, `chatgpt:<model>`...
+    fn describe(&self) -> String {
+        "model".to_string()
+    }
 }
 
 /// Codex on the owner's ChatGPT subscription, through `codex exec`.
@@ -60,6 +65,10 @@ impl Llm for CodexExec {
             )));
         }
         Ok(text)
+    }
+
+    fn describe(&self) -> String {
+        "codex".to_string()
     }
 }
 
