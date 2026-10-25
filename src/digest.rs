@@ -104,7 +104,7 @@ fn nothing(text: &str) -> Answer {
 }
 
 /// What a passage takes in a request: its text, the source title and the framing around them.
-fn cost(passages: &[Numbered]) -> usize {
+pub(crate) fn cost(passages: &[Numbered]) -> usize {
     passages
         .iter()
         .map(|n| n.passage.text.chars().count() + n.passage.source_title.chars().count() + 20)
@@ -144,7 +144,7 @@ fn merge_summaries(llm: &dyn Llm, parts: Vec<(String, Answer)>) -> Result<Answer
 
 /// Cuts the passages into consecutive parts that each fit the budget (a passage bigger than
 /// the budget gets a part of its own). Refuses before any call if there would be too many.
-fn split_into_parts<'p, 'a>(
+pub(crate) fn split_into_parts<'p, 'a>(
     pool: &'p [Numbered<'a>],
     budget: &Budget,
 ) -> Result<Vec<&'p [Numbered<'a>]>> {

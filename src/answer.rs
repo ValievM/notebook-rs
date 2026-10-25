@@ -71,11 +71,11 @@ pub fn ask_task(llm: &dyn Llm, task: &str, passages: &[Numbered]) -> Result<Answ
 /// after the object (sometimes with braces of their own), so the text between the first `{` and
 /// the last `}` is not the object; each `{` is tried in turn and what follows the object is
 /// ignored.
-fn first_reply(raw: &str) -> Result<Reply> {
+pub fn first_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
     let mut first_error = None;
     for (start, _) in raw.match_indices('{') {
         match serde_json::Deserializer::from_str(&raw[start..])
-            .into_iter::<Reply>()
+            .into_iter::<T>()
             .next()
         {
             Some(Ok(reply)) => return Ok(reply),
@@ -103,7 +103,7 @@ pub fn ask_merge(
     let prompt = format!(
         "{body}\nОтветь JSON-объектом без пояснений вокруг: {{\"answer\": \"...\"}}. Ссылки [n] оставляй как есть, новых не добавляй.\n"
     );
-    let reply = first_reply(&llm.complete(&prompt)?)?;
+    let reply = first_json::<Reply>(&llm.complete(&prompt)?)?;
     let mut citations: Vec<Citation> = Vec::new();
     for citation in known {
         let mentioned = reply.answer.contains(&format!("[{}]", citation.n));
@@ -124,7 +124,7 @@ pub fn ask_merge(
 
 /// Like `parse`, for passages that carry their own numbers.
 pub fn parse_numbered(raw: &str, passages: &[Numbered]) -> Result<Answer> {
-    let reply = first_reply(raw)?;
+    let reply = first_json::<Reply>(raw)?;
     let mut citations = Vec::new();
     let mut rejected_quotes = 0;
     for cited in reply.citations {
@@ -148,14 +148,19 @@ pub fn parse_numbered(raw: &str, passages: &[Numbered]) -> Result<Answer> {
     })
 }
 
+const ANSWER_FORMAT: &str = "Отвечай только по приведённым фрагментам источников. Если ответа в них нет, так и скажи.\n\
+         Ответь JSON-объектом без пояснений вокруг: {\"answer\": \"...\", \"citations\": [{\"n\": 1, \"quote\": \"дословная цитата из фрагмента\"}]}.\n\
+         В answer ссылайся на фрагменты как [1], [2]. В quote копируй слова фрагмента дословно.\n\n";
+
 /// The instructions about the reply format, `head`, the numbered passages, then `tail` (the
 /// question or the task).
 fn render(head: &str, passages: &[Numbered], tail: &str) -> String {
-    let mut text = String::from(
-        "Отвечай только по приведённым фрагментам источников. Если ответа в них нет, так и скажи.\n\
-         Ответь JSON-объектом без пояснений вокруг: {\"answer\": \"...\", \"citations\": [{\"n\": 1, \"quote\": \"дословная цитата из фрагмента\"}]}.\n\
-         В answer ссылайся на фрагменты как [1], [2]. В quote копируй слова фрагмента дословно.\n\n",
-    );
+    render_custom(ANSWER_FORMAT, head, passages, tail)
+}
+
+/// Like `render`, with other instructions about the reply (a map, cards...).
+pub fn render_custom(format: &str, head: &str, passages: &[Numbered], tail: &str) -> String {
+    let mut text = String::from(format);
     text.push_str(head);
     for numbered in passages {
         text.push_str(&format!(
@@ -304,7 +309,7 @@ pub fn locate(text: &str, quote: &str) -> Option<std::ops::Range<usize>> {
     Some(haystack.spans[first].0..haystack.spans[last].1)
 }
 
-fn contains_quote(passage: &str, quote: &str) -> bool {
+pub fn contains_quote(passage: &str, quote: &str) -> bool {
     locate(passage, quote).is_some()
 }
 

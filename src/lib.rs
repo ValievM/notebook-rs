@@ -11,6 +11,7 @@ pub mod embed_fast;
 pub mod error;
 pub mod llm;
 pub mod metrics;
+pub mod mindmap;
 pub mod parallel;
 pub mod retrieve;
 pub mod service;
