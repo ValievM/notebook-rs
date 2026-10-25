@@ -15,6 +15,21 @@ pub struct NewPassage {
     pub embedding: Option<Vec<f32>>,
 }
 
+/// A notebook with the number of its sources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotebookInfo {
+    pub id: NotebookId,
+    pub name: String,
+    pub sources: usize,
+}
+
+/// A source with the number of its passages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceInfo {
+    pub title: String,
+    pub passages: usize,
+}
+
 /// The vectors of one notebook for one model, shared between readers without copying.
 pub type EmbeddedPassages = Arc<Vec<(Passage, Vec<f32>)>>;
 
@@ -121,13 +136,7 @@ impl Store {
             )
             .ok();
         if let Some(id) = old {
-            tx.execute(
-                "INSERT INTO passage_index(passage_index, rowid, text)
-                 SELECT 'delete', id, text FROM passage WHERE source_id = ?1",
-                [id],
-            )?;
-            tx.execute("DELETE FROM passage WHERE source_id = ?1", [id])?;
-            tx.execute("DELETE FROM source WHERE id = ?1", [id])?;
+            remove_source_rows(&tx, id)?;
         }
         tx.execute(
             "INSERT INTO source(notebook_id, title) VALUES (?1, ?2)",
@@ -155,6 +164,63 @@ impl Store {
         }
         tx.commit()?;
         Ok(passages.len())
+    }
+
+    /// Every notebook with its number of sources, in the order they were created.
+    pub fn list_notebooks(&self) -> Result<Vec<NotebookInfo>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT n.id, n.name, (SELECT COUNT(*) FROM source s WHERE s.notebook_id = n.id)
+             FROM notebook n ORDER BY n.id",
+        )?;
+        let rows = statement.query_map([], |r| {
+            Ok(NotebookInfo {
+                id: NotebookId(r.get(0)?),
+                name: r.get(1)?,
+                sources: r.get::<_, i64>(2)? as usize,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The sources of the notebook with their number of passages, in the order they were added.
+    pub fn source_infos(&self, notebook: NotebookId) -> Result<Vec<SourceInfo>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT s.title, (SELECT COUNT(*) FROM passage p WHERE p.source_id = s.id)
+             FROM source s WHERE s.notebook_id = ?1 ORDER BY s.id",
+        )?;
+        let rows = statement.query_map([notebook.0], |r| {
+            Ok(SourceInfo {
+                title: r.get(0)?,
+                passages: r.get::<_, i64>(1)? as usize,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Removes a source with its passages. Returns whether there was such a source.
+    pub fn delete_source(&self, notebook: NotebookId, title: &str) -> Result<bool> {
+        let removed = {
+            let db = self.db();
+            let tx = db.unchecked_transaction()?;
+            let id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM source WHERE notebook_id = ?1 AND title = ?2",
+                    params![notebook.0, title],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(id) = id {
+                remove_source_rows(&tx, id)?;
+            }
+            tx.commit()?;
+            id.is_some()
+        };
+        if removed {
+            self.forget_vectors();
+        }
+        Ok(removed)
     }
 
     pub fn source_count(&self, notebook: NotebookId) -> Result<usize> {
@@ -266,6 +332,18 @@ impl Store {
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
+}
+
+/// Deletes a source, its passages and their entries in the text index.
+fn remove_source_rows(tx: &rusqlite::Transaction<'_>, source_id: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO passage_index(passage_index, rowid, text)
+         SELECT 'delete', id, text FROM passage WHERE source_id = ?1",
+        [source_id],
+    )?;
+    tx.execute("DELETE FROM passage WHERE source_id = ?1", [source_id])?;
+    tx.execute("DELETE FROM source WHERE id = ?1", [source_id])?;
+    Ok(())
 }
 
 fn passage_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Passage> {
@@ -434,6 +512,86 @@ mod tests {
         assert!(store.source_titles(other).unwrap().is_empty());
         assert!(store.source_passages(other, None).unwrap().is_empty());
         assert_eq!(store.source_passages(nb, None).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn lists_notebooks_with_their_number_of_sources() {
+        let (store, nb) = notebook_with_two_sources();
+        let empty = store.create_notebook("пустой").unwrap();
+        assert_eq!(
+            store.list_notebooks().unwrap(),
+            vec![
+                NotebookInfo {
+                    id: nb,
+                    name: "n".into(),
+                    sources: 2
+                },
+                NotebookInfo {
+                    id: empty,
+                    name: "пустой".into(),
+                    sources: 0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lists_sources_with_their_number_of_passages() {
+        let (store, nb) = notebook_with_two_sources();
+        assert_eq!(
+            store.source_infos(nb).unwrap(),
+            vec![
+                SourceInfo {
+                    title: "a.txt".into(),
+                    passages: 2
+                },
+                SourceInfo {
+                    title: "b.txt".into(),
+                    passages: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_deleted_source_is_gone_from_listings_search_and_vectors() {
+        let store = Store::in_memory().unwrap();
+        let nb = store.create_notebook("n").unwrap();
+        store
+            .add_source(
+                nb,
+                "a.txt",
+                &[passage(0, "красная лиса", Some(vec![1.0]))],
+                "m",
+            )
+            .unwrap();
+        store
+            .add_source(
+                nb,
+                "b.txt",
+                &[passage(0, "синяя лиса", Some(vec![1.0]))],
+                "m",
+            )
+            .unwrap();
+        let before = store.embedded_passages(nb, "m").unwrap();
+        assert_eq!(before.len(), 2);
+
+        assert!(store.delete_source(nb, "a.txt").unwrap());
+
+        assert_eq!(store.source_titles(nb).unwrap(), vec!["b.txt"]);
+        let found = store.search_text(nb, "\"лиса\"*", 5).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source_title, "b.txt");
+        assert_eq!(store.embedded_passages(nb, "m").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_an_unknown_source_or_one_of_another_notebook_changes_nothing() {
+        let (store, nb) = notebook_with_two_sources();
+        let other = store.create_notebook("other").unwrap();
+        assert!(!store.delete_source(nb, "нет.txt").unwrap());
+        assert!(!store.delete_source(other, "a.txt").unwrap());
+        assert_eq!(store.source_titles(nb).unwrap(), vec!["a.txt", "b.txt"]);
     }
 
     fn with_vector(title: &str, store: &Store, nb: NotebookId) {

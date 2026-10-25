@@ -14,6 +14,8 @@ pub struct Citation {
     /// 1-based number of the passage, as in the prompt.
     pub n: usize,
     pub source_title: String,
+    /// Position of the passage inside its source, to open the source at the cited place.
+    pub ordinal: usize,
     pub quote: String,
 }
 
@@ -81,6 +83,7 @@ pub fn parse_numbered(raw: &str, passages: &[Numbered]) -> Result<Answer> {
                 citations.push(Citation {
                     n: cited.n,
                     source_title: found.passage.source_title.clone(),
+                    ordinal: found.passage.ordinal,
                     quote: cited.quote,
                 })
             }
@@ -157,16 +160,56 @@ pub fn parse(raw: &str, passages: &[Passage]) -> Result<Answer> {
     parse_numbered(raw, &number_from_one(passages))
 }
 
-fn normalize(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+/// Where the quote sits in the text, as a byte range of the original text. Quotes are matched
+/// the way they are checked: whitespace runs count as one space and case does not matter.
+pub fn locate(text: &str, quote: &str) -> Option<std::ops::Range<usize>> {
+    let wanted = Normalized::of(quote);
+    if wanted.text.is_empty() {
+        return None;
+    }
+    let haystack = Normalized::of(text);
+    let at = haystack.text.find(&wanted.text)?;
+    let first = haystack.text[..at].chars().count();
+    let last = first + wanted.text.chars().count() - 1;
+    Some(haystack.spans[first].0..haystack.spans[last].1)
 }
 
 fn contains_quote(passage: &str, quote: &str) -> bool {
-    let quote = normalize(quote);
-    !quote.is_empty() && normalize(passage).contains(&quote)
+    locate(passage, quote).is_some()
+}
+
+/// A text with whitespace runs squeezed into one space (none at the ends) and lowercased,
+/// remembering for every character where it came from in the original (a byte range). The one
+/// normalization behind both "is the quote in the passage" and "where is it".
+struct Normalized {
+    text: String,
+    spans: Vec<(usize, usize)>,
+}
+
+impl Normalized {
+    fn of(original: &str) -> Self {
+        let mut text = String::new();
+        let mut spans = Vec::new();
+        let mut gap: Option<(usize, usize)> = None;
+        for (start, c) in original.char_indices() {
+            let end = start + c.len_utf8();
+            if c.is_whitespace() {
+                if !text.is_empty() {
+                    gap = Some(gap.map_or((start, end), |(first, _)| (first, end)));
+                }
+                continue;
+            }
+            if let Some(span) = gap.take() {
+                text.push(' ');
+                spans.push(span);
+            }
+            for lower in c.to_lowercase() {
+                text.push(lower);
+                spans.push((start, end));
+            }
+        }
+        Self { text, spans }
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +283,49 @@ mod tests {
         let kept: Vec<usize> = answer.citations.iter().map(|c| c.n).collect();
         assert_eq!(kept, vec![7, 12]);
         assert_eq!(answer.rejected_quotes, 2);
+    }
+
+    #[test]
+    fn a_found_quote_is_located_in_the_original_text_despite_case_and_whitespace() {
+        let text = "Начало. Срок  ДЕЙСТВИЯ\nдоговора — два года. Конец.";
+        let range = locate(text, "срок действия договора").unwrap();
+        assert_eq!(&text[range], "Срок  ДЕЙСТВИЯ\nдоговора");
+    }
+
+    #[test]
+    fn a_quote_at_the_very_start_and_end_is_located() {
+        let text = "Первое слово и последнее";
+        assert_eq!(&text[locate(text, "первое").unwrap()], "Первое");
+        assert_eq!(&text[locate(text, "  ПОСЛЕДНЕЕ \n").unwrap()], "последнее");
+    }
+
+    #[test]
+    fn a_quote_that_is_not_there_or_is_empty_is_not_located() {
+        assert_eq!(locate("Срок два года.", "срок три года"), None);
+        assert_eq!(locate("Срок два года.", "   "), None);
+        assert_eq!(locate("", "срок"), None);
+    }
+
+    #[test]
+    fn what_is_located_is_exactly_what_is_accepted_as_a_citation() {
+        let text = "Арендатор обязан\nосвободить помещение.";
+        for quote in ["арендатор ОБЯЗАН освободить", "помещение", "нет такого"]
+        {
+            assert_eq!(
+                locate(text, quote).is_some(),
+                contains_quote(text, quote),
+                "{quote}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_citation_knows_the_position_of_its_passage_in_the_source() {
+        let mut passage = passage_text("договор.txt", "Срок действия договора два года.");
+        passage.ordinal = 4;
+        let reply = r#"{"answer":"ок","citations":[{"n":1,"quote":"два года"}]}"#;
+        let answer = parse(reply, std::slice::from_ref(&passage)).unwrap();
+        assert_eq!(answer.citations[0].ordinal, 4);
     }
 
     #[test]

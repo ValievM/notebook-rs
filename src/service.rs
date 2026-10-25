@@ -11,7 +11,8 @@ use crate::embed::Embedder;
 use crate::error::{Error, Result};
 use crate::llm::Llm;
 use crate::retrieve::{Bm25Retriever, HybridRetriever, Retriever, VectorRetriever};
-use crate::store::{NewPassage, Store};
+use crate::store::{NewPassage, NotebookInfo, SourceInfo, Store};
+use crate::view::{PassageView, source_view};
 use std::sync::Arc;
 
 const PASSAGES_PER_QUESTION: usize = 6;
@@ -107,6 +108,35 @@ impl Notebooks {
             }
         }
         self.store.source_passages(notebook, title)
+    }
+
+    /// Every notebook with its number of sources.
+    pub fn list_notebooks(&self) -> Result<Vec<NotebookInfo>> {
+        self.store.list_notebooks()
+    }
+
+    /// The sources of the notebook with their number of passages.
+    pub fn sources(&self, notebook: NotebookId) -> Result<Vec<SourceInfo>> {
+        self.store.source_infos(notebook)
+    }
+
+    /// Removes a source; an unknown title is an error that lists the titles there are.
+    pub fn delete_source(&self, notebook: NotebookId, title: &str) -> Result<()> {
+        self.passages_of(notebook, Some(title))?;
+        self.store.delete_source(notebook, title)?;
+        Ok(())
+    }
+
+    /// A source laid out for reading. `cited` (position of the cited passage and the quote)
+    /// marks the cited place.
+    pub fn source_view(
+        &self,
+        notebook: NotebookId,
+        title: &str,
+        cited: Option<(usize, &str)>,
+    ) -> Result<Vec<PassageView>> {
+        let passages = self.passages_of(notebook, Some(title))?;
+        Ok(source_view(&passages, cited))
     }
 
     /// A summary of one source, or of the whole notebook when `source` is `None`.
@@ -228,6 +258,45 @@ mod tests {
             notebooks.add_source(nb, title, text).unwrap();
         }
         (notebooks, nb)
+    }
+
+    #[test]
+    fn the_notebook_lists_its_sources_and_a_deleted_one_is_gone() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = notebook_with_three_sources(&prompts);
+        let titles: Vec<String> = notebooks
+            .sources(nb)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        assert_eq!(titles, vec!["договор.txt", "памятка.txt", "заметки.txt"]);
+        assert_eq!(notebooks.list_notebooks().unwrap()[0].sources, 3);
+
+        notebooks.delete_source(nb, "памятка.txt").unwrap();
+
+        let titles: Vec<String> = notebooks
+            .sources(nb)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        assert_eq!(titles, vec!["договор.txt", "заметки.txt"]);
+        let error = notebooks.delete_source(nb, "памятка.txt").unwrap_err();
+        assert!(matches!(error, crate::error::Error::NotFound(_)));
+    }
+
+    #[test]
+    fn a_citation_opens_its_source_at_the_quoted_place() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (notebooks, nb) = notebook_with_three_sources(&prompts);
+        let view = notebooks
+            .source_view(nb, "договор.txt", Some((0, "ДВА года")))
+            .unwrap();
+        assert_eq!(view[0].hit.as_deref(), Some("два года"));
+        assert_eq!(view[0].before, "Срок действия договора ");
+        let missing = notebooks.source_view(nb, "нет.txt", None).unwrap_err();
+        assert!(matches!(missing, crate::error::Error::NotFound(_)));
     }
 
     #[test]
