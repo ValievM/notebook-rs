@@ -5,8 +5,8 @@
 mod dto;
 
 use dto::{
-    AccountDto, AnswerDto, ModelStateDto, NotebookDto, PassageViewDto, SourceDto, StatusDto,
-    SummaryDto, user_message,
+    AccountDto, AnswerDto, HistoryEntryDto, ModelStateDto, NotebookDto, PassageViewDto, SourceDto,
+    StatusDto, SummaryDto, user_message,
 };
 use notebook_rs::chatgpt::{ChatGptAccount, open_in_browser};
 use notebook_rs::domain::NotebookId;
@@ -285,6 +285,33 @@ async fn delete_source(
     .await
 }
 
+/// The dialog of the notebook, oldest first.
+#[tauri::command]
+async fn history(
+    engine: State<'_, Engine>,
+    notebook_id: i64,
+) -> Result<Vec<HistoryEntryDto>, String> {
+    let notebooks = engine.get()?;
+    blocking(&engine, None, None, move || {
+        Ok(notebooks
+            .history(NotebookId(notebook_id))?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    })
+    .await
+}
+
+/// Forgets the dialog of the notebook; its sources stay.
+#[tauri::command]
+async fn clear_history(engine: State<'_, Engine>, notebook_id: i64) -> Result<(), String> {
+    let notebooks = engine.get()?;
+    blocking(&engine, Some("command.clear_history"), None, move || {
+        notebooks.clear_history(NotebookId(notebook_id))
+    })
+    .await
+}
+
 #[tauri::command]
 async fn ask(
     engine: State<'_, Engine>,
@@ -469,6 +496,8 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         add_source,
         delete_source,
         ask,
+        history,
+        clear_history,
         summarize,
         compare,
         source_view,
@@ -873,6 +902,39 @@ mod ipc_tests {
             call(&window, "account_status", json!({})).unwrap(),
             json!({"signedIn": true, "provider": "chatgpt"})
         );
+    }
+
+    #[test]
+    fn the_dialog_of_a_notebook_comes_back_to_the_page_and_can_be_cleared() {
+        let directory = tempfile::tempdir().unwrap();
+        let window = window(measured_engine(directory.path()));
+        let id = call(&window, "create_notebook", json!({"name": "n"})).unwrap()["id"].clone();
+        let file = directory.path().join("договор.txt");
+        std::fs::write(&file, "Срок действия договора составляет два года.").unwrap();
+        call(
+            &window,
+            "add_source",
+            json!({"notebookId": id, "location": file.to_str().unwrap()}),
+        )
+        .unwrap();
+
+        call(
+            &window,
+            "ask",
+            json!({"notebookId": id, "question": "Какой срок?", "deep": false}),
+        )
+        .unwrap();
+        let history = call(&window, "history", json!({"notebookId": id})).unwrap();
+
+        assert_eq!(history.as_array().unwrap().len(), 2);
+        assert_eq!(history[0]["user"], true);
+        assert_eq!(history[0]["text"], "Какой срок?");
+        assert_eq!(history[1]["user"], false);
+        assert_eq!(history[1]["citations"][0]["sourceTitle"], "договор.txt");
+
+        call(&window, "clear_history", json!({"notebookId": id})).unwrap();
+        let after = call(&window, "history", json!({"notebookId": id})).unwrap();
+        assert_eq!(after, json!([]));
     }
 
     #[test]

@@ -118,7 +118,56 @@ async function selectNotebook(id) {
   $('messages').replaceChildren();
   renderEmptyDialog();
   await loadSources();
+  await loadHistory(id);
 }
+
+const ANSWER_KINDS = { ask: 'Ответ', summarize: 'Конспект', compare: 'Сравнение' };
+
+/** The dialog the notebook had when it was left: questions, answers with their citations. */
+async function loadHistory(id) {
+  try {
+    const entries = await api.invoke('history', { notebookId: id });
+    if (state.current !== id) return; // the person moved on to another notebook meanwhile
+    $('messages').replaceChildren();
+    renderEmptyDialog();
+    for (const entry of entries) {
+      addMessage(entry.user
+        ? h('div', { class: 'message user' }, entry.text)
+        : answerMessage(ANSWER_KINDS[entry.kind] ?? 'Ответ', entry));
+    }
+  } catch (error) { toast(String(error), 'error'); }
+  renderClearButton();
+}
+
+function renderClearButton() {
+  const button = $('clear-history');
+  button.disabled = state.current === null || !$('messages').querySelector('.message');
+  resetClearButton();
+}
+
+function resetClearButton() {
+  const button = $('clear-history');
+  button.classList.remove('confirm');
+  button.textContent = 'Очистить диалог';
+}
+
+let clearTimer = null;
+$('clear-history').addEventListener('click', async () => {
+  const button = $('clear-history');
+  if (!button.classList.contains('confirm')) {
+    button.classList.add('confirm');
+    button.textContent = 'Точно очистить?';
+    clearTimer = setTimeout(resetClearButton, 3000);
+    return;
+  }
+  clearTimeout(clearTimer);
+  try {
+    await api.invoke('clear_history', { notebookId: state.current });
+    $('messages').replaceChildren();
+    renderEmptyDialog();
+  } catch (error) { toast(String(error), 'error'); }
+  renderClearButton();
+});
 
 function closeNotebookMenu() {
   $('notebook-menu').hidden = true;
@@ -305,6 +354,7 @@ function addMessage(node) {
   const messages = $('messages');
   messages.querySelector('[data-empty]')?.remove();
   messages.append(node);
+  $('clear-history').disabled = false;
   messages.scrollTop = messages.scrollHeight;
   return node;
 }

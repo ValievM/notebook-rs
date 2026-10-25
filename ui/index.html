@@ -42,6 +42,9 @@
     </section>
 
     <main class="chat" aria-label="Диалог">
+      <div class="chat-tools">
+        <button id="clear-history" type="button" class="quiet" disabled>Очистить диалог</button>
+      </div>
       <div id="messages" class="messages" role="log" aria-live="polite"></div>
       <form id="composer" class="composer">
         <textarea id="question" rows="2" placeholder="Задайте вопрос по источникам блокнота" aria-label="Вопрос"></textarea>

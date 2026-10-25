@@ -15,6 +15,7 @@ const data = {
   ],
 };
 
+data.history = {};
 const account = { signedIn: false };
 const modelChoice = { model: null, effort: null };
 const modelList = [
@@ -93,7 +94,14 @@ export const api = {
           ],
         };
       }
-      case 'ask': return structuredClone(answer);
+      case 'history': return structuredClone(data.history[args.notebookId] ?? []);
+      case 'clear_history': data.history[args.notebookId] = []; return null;
+      case 'ask': {
+        const list = (data.history[args.notebookId] ??= []);
+        list.push({ id: list.length + 1, user: true, kind: 'ask', text: args.question, citations: [], rejectedQuotes: 0 });
+        list.push({ id: list.length + 1, user: false, kind: 'ask', ...structuredClone(answer) });
+        return structuredClone(answer);
+      }
       case 'summarize': return { ...structuredClone(answer), text: 'Договор аренды > Срок\n- Два года с даты подписания [1]\nДоговор аренды > Оплата\n- Ежемесячно до десятого числа [2]' };
       case 'compare': return { ...structuredClone(answer), text: 'Общее: оба источника говорят о выезде за тридцать дней [3].\nРазличия: договор задаёт срок и оплату [1][2].\nПротиворечия: нет.' };
       case 'source_view': {

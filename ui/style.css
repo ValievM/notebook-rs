@@ -203,6 +203,8 @@ body { display: flex; flex-direction: column; }
 .source-delete.confirm { color: var(--danger); font-weight: 600; }
 
 /* Chat */
+.chat-tools { display: flex; justify-content: flex-end; padding: 0 16px; min-height: 28px; }
+#clear-history.confirm { color: var(--danger); }
 .chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .messages { flex: 1; overflow-y: auto; padding: 22px 28px; display: flex; flex-direction: column; gap: 16px; }
 

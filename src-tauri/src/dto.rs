@@ -5,6 +5,7 @@ use notebook_rs::answer::{Answer, Citation};
 use notebook_rs::chatgpt::ModelEntry;
 use notebook_rs::error::Error;
 use notebook_rs::metrics::Summary;
+use notebook_rs::service::HistoryEntry;
 use notebook_rs::settings::{EFFORTS, Settings};
 use notebook_rs::store::{NotebookInfo, SourceInfo};
 use notebook_rs::view::PassageView;
@@ -40,6 +41,31 @@ pub struct AnswerDto {
     pub text: String,
     pub citations: Vec<CitationDto>,
     pub rejected_quotes: usize,
+}
+
+/// One message of the dialog of a notebook: the person's or the assistant's.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntryDto {
+    pub id: i64,
+    pub user: bool,
+    pub kind: String,
+    pub text: String,
+    pub citations: Vec<CitationDto>,
+    pub rejected_quotes: usize,
+}
+
+impl From<HistoryEntry> for HistoryEntryDto {
+    fn from(entry: HistoryEntry) -> Self {
+        Self {
+            id: entry.id,
+            user: entry.user,
+            kind: entry.kind,
+            text: entry.text,
+            citations: entry.citations.into_iter().map(Into::into).collect(),
+            rejected_quotes: entry.rejected_quotes,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, PartialEq)]
