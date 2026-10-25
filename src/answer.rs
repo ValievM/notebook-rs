@@ -59,7 +59,7 @@ pub fn number_from_one(passages: &[Passage]) -> Vec<Numbered<'_>> {
 
 /// A prompt for a task other than a question ("make a summary", "compare"), over numbered passages.
 pub fn task_prompt(task: &str, passages: &[Numbered]) -> String {
-    render(passages, &format!("Задание: {task}\n"))
+    render("", passages, &format!("Задание: {task}\n"))
 }
 
 /// Asks the model to do the task; the citations in the reply are checked against `passages`.
@@ -148,14 +148,15 @@ pub fn parse_numbered(raw: &str, passages: &[Numbered]) -> Result<Answer> {
     })
 }
 
-/// The instructions about the reply format, the numbered passages, then `tail` (the question
-/// or the task).
-fn render(passages: &[Numbered], tail: &str) -> String {
+/// The instructions about the reply format, `head`, the numbered passages, then `tail` (the
+/// question or the task).
+fn render(head: &str, passages: &[Numbered], tail: &str) -> String {
     let mut text = String::from(
         "Отвечай только по приведённым фрагментам источников. Если ответа в них нет, так и скажи.\n\
          Ответь JSON-объектом без пояснений вокруг: {\"answer\": \"...\", \"citations\": [{\"n\": 1, \"quote\": \"дословная цитата из фрагмента\"}]}.\n\
          В answer ссылайся на фрагменты как [1], [2]. В quote копируй слова фрагмента дословно.\n\n",
     );
+    text.push_str(head);
     for numbered in passages {
         text.push_str(&format!(
             "[{}] Источник «{}»:\n{}\n\n",
@@ -181,7 +182,13 @@ pub fn prompt_guided(question: &str, guidance: &[String], passages: &[Passage]) 
         tail.push('\n');
     }
     tail.push_str(&format!("Вопрос: {question}\n"));
-    render(&number_from_one(passages), &tail)
+    // The question is also first: among many passages a question at the end was lost on a model
+    // that thinks little ("Вопрос не указан").
+    render(
+        &format!("Вопрос (повторён в конце): {question}\n\n"),
+        &number_from_one(passages),
+        &tail,
+    )
 }
 
 pub fn ask(llm: &dyn Llm, question: &str, passages: &[Passage]) -> Result<Answer> {
@@ -299,6 +306,15 @@ mod tests {
             ordinal: 0,
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn the_question_stands_before_the_passages_too_so_it_is_not_lost_among_them() {
+        let text = prompt("Какая столица Австралии?", &passages());
+        let first = text.find("Какая столица Австралии?").unwrap();
+        let last = text.rfind("Какая столица Австралии?").unwrap();
+        assert!(first < text.find("[1] Источник").unwrap());
+        assert!(last > text.rfind("] Источник").unwrap());
     }
 
     #[test]
