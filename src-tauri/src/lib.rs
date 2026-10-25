@@ -5,8 +5,8 @@
 mod dto;
 
 use dto::{
-    AccountDto, AnswerDto, NotebookDto, PassageViewDto, SourceDto, StatusDto, SummaryDto,
-    user_message,
+    AccountDto, AnswerDto, ModelStateDto, NotebookDto, PassageViewDto, SourceDto, StatusDto,
+    SummaryDto, user_message,
 };
 use notebook_rs::chatgpt::{ChatGptAccount, open_in_browser};
 use notebook_rs::domain::NotebookId;
@@ -127,12 +127,6 @@ fn build_engine(metrics: &Metrics, account: &ChatGptAccount) -> NotebookResult<A
     let directory = PathBuf::from(home).join(".notebook-rs");
     std::fs::create_dir_all(&directory)?;
     let store = Store::open(&directory.join("notebooks.db"))?;
-    // What `nb use` saved; the environment variables of the old way still win.
-    let settings = notebook_rs::settings::Settings::load(&directory.join("settings.json"))?
-        .overridden_by(
-            std::env::var("NOTEBOOK_RS_MODEL").ok(),
-            std::env::var("NOTEBOOK_RS_EFFORT").ok(),
-        );
     let embedder = metrics
         .span("engine.model_load")
         .run(|_| FastEmbedder::new(directory.join("models")))?;
@@ -141,12 +135,8 @@ fn build_engine(metrics: &Metrics, account: &ChatGptAccount) -> NotebookResult<A
         Arc::new(embedder),
         // The ChatGPT subscription when signed in, Codex when not; the choice is made at every
         // question, so signing in from the window works at once. The model and how much it
-        // thinks can be chosen with these two variables (the same ones `nb` reads).
-        Box::new(account.llm(
-            Box::new(CodexExec::default()),
-            settings.model.as_deref(),
-            settings.effort.as_deref(),
-        )),
+        // thinks are the account's current choice, which the window changes while it runs.
+        Box::new(account.llm(Box::new(CodexExec::default()))),
         metrics.clone(),
     )))
 }
@@ -413,6 +403,42 @@ fn account_status(engine: State<'_, Engine>) -> AccountDto {
     AccountDto::new(engine.account.signed_in())
 }
 
+/// The model and the effort in use, and the models the account offers (none without a sign-in).
+#[tauri::command]
+async fn model_state(engine: State<'_, Engine>) -> Result<ModelStateDto, String> {
+    let account = engine.account.clone();
+    blocking(&engine, None, None, move || {
+        let models = if account.signed_in() {
+            account.models()?
+        } else {
+            Vec::new()
+        };
+        Ok(ModelStateDto::new(&account.choice(), models))
+    })
+    .await
+}
+
+/// Chooses the model and/or the effort; the next question already uses them.
+#[tauri::command]
+async fn model_choose(
+    engine: State<'_, Engine>,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<(), String> {
+    let account = engine.account.clone();
+    blocking(
+        &engine,
+        Some("command.model_choose"),
+        model.clone(),
+        move || {
+            account
+                .choose(model.as_deref(), effort.as_deref())
+                .map(|_| ())
+        },
+    )
+    .await
+}
+
 /// Signs in through the browser; waits up to five minutes for the person to approve.
 #[tauri::command]
 async fn account_sign_in(engine: State<'_, Engine>) -> Result<(), String> {
@@ -448,6 +474,8 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         source_view,
         metrics_summary,
         account_status,
+        model_state,
+        model_choose,
         account_sign_in,
         account_sign_out
     ])
@@ -468,7 +496,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(match account_file {
             Some(file) => {
-                Engine::with_telemetry(telemetry).with_account(ChatGptAccount::open(file))
+                // What `nb use` or the window saved; the old environment variables still win.
+                let settings_file = file.with_file_name("settings.json");
+                let initial = notebook_rs::settings::Settings::load(&settings_file)
+                    .inspect_err(|error| eprintln!("notebook-rs: settings are ignored: {error}"))
+                    .unwrap_or_default()
+                    .overridden_by(
+                        std::env::var("NOTEBOOK_RS_MODEL").ok(),
+                        std::env::var("NOTEBOOK_RS_EFFORT").ok(),
+                    );
+                Engine::with_telemetry(telemetry)
+                    .with_account(ChatGptAccount::open(file).with_settings(settings_file, initial))
             }
             None => Engine::with_telemetry(telemetry),
         })
@@ -835,6 +873,32 @@ mod ipc_tests {
             call(&window, "account_status", json!({})).unwrap(),
             json!({"signedIn": true, "provider": "chatgpt"})
         );
+    }
+
+    #[test]
+    fn the_page_chooses_the_effort_and_it_is_saved_and_shown_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("settings.json");
+        let account = ChatGptAccount::open(directory.path().join("chatgpt-auth.json"))
+            .with_settings(file.clone(), notebook_rs::settings::Settings::default());
+        let window = window(Engine::default().with_account(account));
+        let before = call(&window, "model_state", json!({})).unwrap();
+        assert_eq!(before["effort"], serde_json::Value::Null);
+        assert_eq!(
+            before["efforts"],
+            json!(["minimal", "low", "medium", "high"])
+        );
+        assert_eq!(before["models"], json!([]));
+
+        call(&window, "model_choose", json!({"effort": "medium"})).unwrap();
+
+        assert_eq!(
+            call(&window, "model_state", json!({})).unwrap()["effort"],
+            "medium"
+        );
+        assert!(std::fs::read_to_string(&file).unwrap().contains("medium"));
+        let error = call(&window, "model_choose", json!({"effort": "extreme"})).unwrap_err();
+        assert!(error.as_str().unwrap().contains("extreme"), "{error}");
     }
 
     #[test]

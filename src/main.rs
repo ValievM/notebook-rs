@@ -8,7 +8,7 @@ use notebook_rs::{
     llm::CodexExec,
     metrics::{Clock, Metrics, RETENTION_DAYS, SqliteRecorder, SystemClock, report, summarize},
     service::Notebooks,
-    settings::{Settings, check_effort},
+    settings::Settings,
     source::Sources,
     store::Store,
 };
@@ -160,7 +160,7 @@ fn main() -> Result<()> {
         }
         Command::Models => return print_models(&account, &settings),
         Command::Use { model, effort } => {
-            return choose_model(&account, &settings_path, model, effort.as_deref());
+            return choose_model(&account, model, effort.as_deref());
         }
         _ => {}
     }
@@ -184,11 +184,7 @@ fn main() -> Result<()> {
     let mut notebooks = Notebooks::standard_with_metrics(
         Store::open(&path)?,
         embedder,
-        Box::new(account.llm(
-            Box::new(CodexExec::default()),
-            settings.model.as_deref(),
-            settings.effort.as_deref(),
-        )),
+        Box::new(account.llm(Box::new(CodexExec::default()))),
         metrics.clone(),
     );
     if let Some(chars_per_call) = cli.max_chars {
@@ -336,34 +332,11 @@ fn print_models(account: &ChatGptAccount, settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-fn choose_model(
-    account: &ChatGptAccount,
-    settings_path: &std::path::Path,
-    model: &str,
-    effort: Option<&str>,
-) -> Result<()> {
-    if let Some(effort) = effort {
-        check_effort(effort)?;
-    }
-    if account.signed_in() {
-        let models = account.models()?;
-        if !models.iter().any(|m| m.slug == model) {
-            let names: Vec<_> = models.iter().map(|m| m.slug.as_str()).collect();
-            anyhow::bail!(
-                "модели «{model}» нет в списке аккаунта: {}",
-                names.join(", ")
-            );
-        }
-    }
-    let mut saved = Settings::load(settings_path)?;
-    saved.model = Some(model.to_string());
-    if let Some(effort) = effort {
-        saved.effort = Some(effort.to_string());
-    }
-    saved.save(settings_path)?;
+fn choose_model(account: &ChatGptAccount, model: &str, effort: Option<&str>) -> Result<()> {
+    let chosen = account.choose(Some(model), effort)?;
     println!(
-        "Сохранено: модель {model}, размышление {}. Окно подхватит после перезапуска.",
-        saved.effort.as_deref().unwrap_or("по умолчанию")
+        "Сохранено: модель {model}, размышление {}. Окно подхватит новый выбор само.",
+        chosen.effort.as_deref().unwrap_or("по умолчанию")
     );
     Ok(())
 }

@@ -16,6 +16,12 @@ const data = {
 };
 
 const account = { signedIn: false };
+const modelChoice = { model: null, effort: null };
+const modelList = [
+  { slug: 'gpt-6.1-sol', name: 'GPT-6.1-Sol' },
+  { slug: 'gpt-6-luna', name: 'GPT-6-Luna' },
+  { slug: 'gpt-5.6-terra', name: 'GPT-5.6-Terra' },
+];
 
 const passages = {
   'договор.md': [
@@ -54,6 +60,11 @@ export const api = {
         data.sources = data.sources.filter((s) => s.title !== args.title);
         return null;
       case 'account_status': return { signedIn: account.signedIn, provider: account.signedIn ? 'chatgpt' : 'codex' };
+      case 'model_state': return { ...modelChoice, efforts: ['minimal', 'low', 'medium', 'high'], models: account.signedIn ? modelList : [] };
+      case 'model_choose':
+        if (args.model) modelChoice.model = args.model;
+        if (args.effort) modelChoice.effort = args.effort;
+        return null;
       case 'account_sign_in': await delay(900); account.signedIn = true; return null;
       case 'account_sign_out': account.signedIn = false; return null;
       case 'metrics_summary': {

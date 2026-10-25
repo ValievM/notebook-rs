@@ -423,7 +423,49 @@ async function refreshAccount() {
   } catch (error) {
     $('account-line').textContent = String(error);
   }
+  await refreshModelChoice();
 }
+
+const EFFORT_LABELS = { minimal: 'минимальное', low: 'низкое', medium: 'среднее', high: 'высокое' };
+
+function fillSelect(select, choices, current, placeholder) {
+  select.replaceChildren();
+  // The placeholder stands for "no choice made yet" and goes away once a choice exists.
+  if (!current) select.append(new Option(placeholder, ''));
+  for (const [value, label] of choices) select.append(new Option(label, value));
+  select.value = current ?? '';
+}
+
+async function refreshModelChoice() {
+  const box = $('model-choice');
+  if (!state.account?.signedIn) { box.hidden = true; return; }
+  try {
+    const choice = await api.invoke('model_state');
+    fillSelect($('model-select'), choice.models.map((m) => [m.slug, m.name]), choice.model, 'первая из списка аккаунта');
+    fillSelect($('effort-select'), choice.efforts.map((e) => [e, EFFORT_LABELS[e] ?? e]), choice.effort, 'по умолчанию модели');
+    box.hidden = false;
+  } catch (error) {
+    box.hidden = true;
+    toast(String(error), 'error');
+  }
+}
+
+async function choose(args) {
+  try {
+    await api.invoke('model_choose', args);
+    toast('Выбор сохранён: он действует со следующего вопроса.');
+  } catch (error) {
+    toast(String(error), 'error');
+  }
+  await refreshModelChoice();
+}
+
+$('model-select').addEventListener('change', (event) => {
+  if (event.target.value) choose({ model: event.target.value });
+});
+$('effort-select').addEventListener('change', (event) => {
+  if (event.target.value) choose({ effort: event.target.value });
+});
 
 $('account-button').addEventListener('click', async () => {
   const button = $('account-button');

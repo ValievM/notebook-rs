@@ -2,8 +2,10 @@
 //! messages in Russian. No logic of the notebook lives here.
 
 use notebook_rs::answer::{Answer, Citation};
+use notebook_rs::chatgpt::ModelEntry;
 use notebook_rs::error::Error;
 use notebook_rs::metrics::Summary;
+use notebook_rs::settings::{EFFORTS, Settings};
 use notebook_rs::store::{NotebookInfo, SourceInfo};
 use notebook_rs::view::PassageView;
 use serde::Serialize;
@@ -226,6 +228,41 @@ impl AccountDto {
         Self {
             signed_in,
             provider: if signed_in { "chatgpt" } else { "codex" },
+        }
+    }
+}
+
+/// The choice of the model: what is in use and what the account offers.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelStateDto {
+    /// `None`: the first model of the account.
+    pub model: Option<String>,
+    /// `None`: the model's own effort.
+    pub effort: Option<String>,
+    pub efforts: Vec<&'static str>,
+    pub models: Vec<ModelDto>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ModelDto {
+    pub slug: String,
+    pub name: String,
+}
+
+impl ModelStateDto {
+    pub fn new(choice: &Settings, models: Vec<ModelEntry>) -> Self {
+        Self {
+            model: choice.model.clone(),
+            effort: choice.effort.clone(),
+            efforts: EFFORTS.to_vec(),
+            models: models
+                .into_iter()
+                .map(|m| ModelDto {
+                    name: m.display_name.unwrap_or_else(|| m.slug.clone()),
+                    slug: m.slug,
+                })
+                .collect(),
         }
     }
 }

@@ -5,6 +5,7 @@
 use super::{API_BASE, TokenSource};
 use crate::error::{Error, Result};
 use crate::llm::Llm;
+use crate::settings::Settings;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,9 +15,10 @@ const ATTEMPTS: usize = 3;
 
 pub struct ChatGptLlm {
     base_url: String,
-    /// The model to ask for: given by the person, or taken from the list of the account once.
-    model: Mutex<Option<String>>,
-    reasoning_effort: Option<String>,
+    /// What the person chose; shared, so that it can change while the program runs.
+    choice: Arc<Mutex<Settings>>,
+    /// The first model of the account, asked for once when the person chose none.
+    default_model: Mutex<Option<String>>,
     tokens: Arc<TokenSource>,
     agent: ureq::Agent,
     retry_pause: Duration,
@@ -33,8 +35,8 @@ impl ChatGptLlm {
             .into();
         Self {
             base_url: API_BASE.to_string(),
-            model: Mutex::new(None),
-            reasoning_effort: None,
+            choice: Arc::new(Mutex::new(Settings::default())),
+            default_model: Mutex::new(None),
             tokens,
             agent,
             retry_pause: Duration::from_secs(1),
@@ -49,13 +51,19 @@ impl ChatGptLlm {
 
     /// Asks for this model instead of the first one of the account.
     pub fn with_model(self, model: &str) -> Self {
-        *self.model.lock().expect(LOCK) = Some(model.to_string());
+        self.choice.lock().expect(LOCK).model = Some(model.to_string());
+        self
+    }
+
+    /// Reads the model and the effort from this shared choice at every call.
+    pub fn with_shared_choice(mut self, choice: Arc<Mutex<Settings>>) -> Self {
+        self.choice = choice;
         self
     }
 
     /// How much the model thinks (`low`, `medium`, `high`).
-    pub fn with_reasoning_effort(mut self, effort: &str) -> Self {
-        self.reasoning_effort = Some(effort.to_string());
+    pub fn with_reasoning_effort(self, effort: &str) -> Self {
+        self.choice.lock().expect(LOCK).effort = Some(effort.to_string());
         self
     }
 
@@ -66,7 +74,8 @@ impl ChatGptLlm {
 
     /// The model that is asked for now, if it is known yet.
     pub fn model_name(&self) -> Option<String> {
-        self.model.lock().expect(LOCK).clone()
+        let chosen = self.choice.lock().expect(LOCK).model.clone();
+        chosen.or_else(|| self.default_model.lock().expect(LOCK).clone())
     }
 }
 
@@ -82,7 +91,8 @@ impl Llm for ChatGptLlm {
 
     fn complete(&self, prompt: &str) -> Result<String> {
         let model = self.resolve_model()?;
-        let body = request_body(&model, prompt, self.reasoning_effort.as_deref());
+        let effort = self.choice.lock().expect(LOCK).effort.clone();
+        let body = request_body(&model, prompt, effort.as_deref());
         for attempt in 1..=ATTEMPTS {
             match self.stream_once(&body) {
                 Ok(text) => return Ok(text),
@@ -167,7 +177,7 @@ impl ChatGptLlm {
     /// The model to ask for: the chosen one, or the first listed model of the account (asked
     /// for once and remembered).
     fn resolve_model(&self) -> Result<String> {
-        if let Some(model) = self.model.lock().expect(LOCK).clone() {
+        if let Some(model) = self.model_name() {
             return Ok(model);
         }
         // The lock is not held while the server is asked; two first calls at once may both ask,
@@ -180,7 +190,7 @@ impl ChatGptLlm {
                 Error::ModelUnavailable("no models are available for this account".into())
             })?
             .slug;
-        *self.model.lock().expect(LOCK) = Some(model.clone());
+        *self.default_model.lock().expect(LOCK) = Some(model.clone());
         Ok(model)
     }
 
@@ -452,6 +462,46 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_str(&server.requests()[0].body).unwrap();
         assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn a_change_of_the_shared_choice_applies_to_the_next_call() {
+        let server = FakeServer::start(|_| stream_of(&["ок"]));
+        let choice = Arc::new(Mutex::new(Settings::default()));
+        let llm = ChatGptLlm::new(signed_in())
+            .with_base_url(&server.url)
+            .with_shared_choice(choice.clone());
+        *choice.lock().unwrap() = Settings {
+            model: Some("one".into()),
+            effort: Some("low".into()),
+        };
+        llm.complete("x").unwrap();
+        *choice.lock().unwrap() = Settings {
+            model: Some("two".into()),
+            effort: Some("high".into()),
+        };
+        llm.complete("x").unwrap();
+
+        let sent: Vec<serde_json::Value> = server
+            .requests()
+            .iter()
+            .map(|r| serde_json::from_str(&r.body).unwrap())
+            .collect();
+        assert_eq!(
+            (
+                sent[0]["model"].as_str(),
+                sent[0]["reasoning"]["effort"].as_str()
+            ),
+            (Some("one"), Some("low"))
+        );
+        assert_eq!(
+            (
+                sent[1]["model"].as_str(),
+                sent[1]["reasoning"]["effort"].as_str()
+            ),
+            (Some("two"), Some("high"))
+        );
+        assert_eq!(llm.describe(), "chatgpt:two");
     }
 
     #[test]
