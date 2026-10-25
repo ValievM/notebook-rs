@@ -67,13 +67,33 @@ pub fn ask_task(llm: &dyn Llm, task: &str, passages: &[Numbered]) -> Result<Answ
     parse_numbered(&llm.complete(&task_prompt(task, passages))?, passages)
 }
 
+/// The first JSON object of the text that has the shape of a reply. Models add words before and
+/// after the object (sometimes with braces of their own), so the text between the first `{` and
+/// the last `}` is not the object; each `{` is tried in turn and what follows the object is
+/// ignored.
+fn first_reply(raw: &str) -> Result<Reply> {
+    let mut first_error = None;
+    for (start, _) in raw.match_indices('{') {
+        match serde_json::Deserializer::from_str(&raw[start..])
+            .into_iter::<Reply>()
+            .next()
+        {
+            Some(Ok(reply)) => return Ok(reply),
+            Some(Err(error)) => {
+                first_error.get_or_insert(error);
+            }
+            None => {}
+        }
+    }
+    Err(Error::BadReply(match first_error {
+        Some(error) => error.to_string(),
+        None => "no JSON object in the reply".into(),
+    }))
+}
+
 /// Like `parse`, for passages that carry their own numbers.
 pub fn parse_numbered(raw: &str, passages: &[Numbered]) -> Result<Answer> {
-    let no_json = || Error::BadReply("no JSON object in the reply".into());
-    let start = raw.find('{').ok_or_else(no_json)?;
-    let end = raw.rfind('}').ok_or_else(no_json)?;
-    let reply: Reply =
-        serde_json::from_str(&raw[start..=end]).map_err(|e| Error::BadReply(e.to_string()))?;
+    let reply = first_reply(raw)?;
     let mut citations = Vec::new();
     let mut rejected_quotes = 0;
     for cited in reply.citations {
@@ -248,6 +268,19 @@ mod tests {
             ordinal: 0,
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn text_after_the_json_object_does_not_spoil_the_answer() {
+        let raw = "Вот ответ:\n{\"answer\": \"Два года [1]\", \"citations\": []}\n\nПримечание: формат {answer} соблюдён.";
+        let answer = parse(raw, &passages()).unwrap();
+        assert_eq!(answer.text, "Два года [1]");
+    }
+
+    #[test]
+    fn the_first_object_is_the_answer_when_the_model_sends_two() {
+        let raw = r#"{"answer": "первый", "citations": []} {"answer": "второй", "citations": []}"#;
+        assert_eq!(parse(raw, &passages()).unwrap().text, "первый");
     }
 
     #[test]
