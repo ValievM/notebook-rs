@@ -56,7 +56,7 @@ export const api = {
         return created;
       }
       case 'list_sources': return args.notebookId === 1 ? structuredClone(data.sources) : [];
-      case 'add_source': return 3;
+      case 'add_source': return { added: [{ title: 'новый.md', passages: 3 }], failed: [] };
       case 'delete_source':
         data.sources = data.sources.filter((s) => s.title !== args.title);
         return null;
@@ -117,5 +117,6 @@ export const api = {
     }
   },
   pickFiles: async () => [],
+  pickFolder: async () => null,
   onDrop: null,
 };

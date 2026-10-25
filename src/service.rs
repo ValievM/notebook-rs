@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::llm::Llm;
 use crate::metrics::{InstrumentedEmbedder, InstrumentedLlm, InstrumentedRetriever, Metrics};
 use crate::retrieve::{Bm25Retriever, HybridRetriever, Retriever, VectorRetriever};
+use crate::source::{Sources, folder};
 use crate::store::{NewPassage, NotebookInfo, SourceInfo, Store};
 use crate::view::{PassageView, source_view};
 use std::sync::Arc;
@@ -36,6 +37,27 @@ pub struct HistoryEntry {
     pub text: String,
     pub citations: Vec<Citation>,
     pub rejected_quotes: usize,
+}
+
+/// What adding a location (a file, a page or a folder) did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AddReport {
+    /// Titles of the sources added, with their number of passages.
+    pub added: Vec<(String, usize)>,
+    /// Files of a folder that could not be added, with the reason. One bad file does not stop
+    /// the others.
+    pub failed: Vec<(String, String)>,
+}
+
+/// What `reindex` did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ReindexReport {
+    /// Sources cut again from their kept text.
+    pub recut: usize,
+    /// Passages of the other sources that got vectors of the current model.
+    pub reembedded_passages: usize,
+    /// Sources that could not be cut again (added before texts were kept).
+    pub without_text: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -168,13 +190,78 @@ impl Notebooks {
                     .subject(title)
                     .field("passages", passages.len() as i64)
                     .run(|_| {
-                        self.store
-                            .add_source(notebook, title, &passages, self.embedder.model())
+                        self.store.add_source_with_text(
+                            notebook,
+                            title,
+                            &passages,
+                            self.embedder.model(),
+                            text,
+                        )
                     })?;
                 span.set("passages", count as i64);
                 self.metrics.sample_memory("after_add");
                 Ok(count)
             })
+    }
+
+    /// Adds what the location points to: a file or a web page becomes one source (an error if it
+    /// cannot be read); a folder becomes one source per supported file in it and in its
+    /// subfolders, and the files that fail are listed in the report.
+    pub fn add_location(
+        &self,
+        notebook: NotebookId,
+        location: &str,
+        sources: &Sources,
+    ) -> Result<AddReport> {
+        let mut report = AddReport::default();
+        let path = std::path::Path::new(location);
+        if !path.is_dir() {
+            let document = sources.read(location)?;
+            let count = self.add_source(notebook, &document.title, &document.text)?;
+            report.added.push((document.title, count));
+            return Ok(report);
+        }
+        for (title, file) in folder::files_in(path)? {
+            let added = sources
+                .read(&file.to_string_lossy())
+                .and_then(|document| self.add_source(notebook, &title, &document.text));
+            match added {
+                Ok(count) => report.added.push((title, count)),
+                Err(error) => report.failed.push((title, error.to_string())),
+            }
+        }
+        Ok(report)
+    }
+
+    /// Cuts every source of the notebook again from its kept text and embeds it again (after the
+    /// way of cutting or the embedding model changed). A source added before texts were kept
+    /// cannot be cut again: its passages only get vectors of the current model.
+    pub fn reindex(&self, notebook: NotebookId) -> Result<ReindexReport> {
+        self.metrics.span("reindex").run(|span| {
+            let mut report = ReindexReport::default();
+            for (title, text) in self.store.source_texts(notebook)? {
+                match text {
+                    Some(text) => {
+                        self.add_source(notebook, &title, &text)?;
+                        report.recut += 1;
+                    }
+                    None => report.without_text.push(title),
+                }
+            }
+            let stale = self
+                .store
+                .passages_without_vectors_of(notebook, self.embedder.model())?;
+            for batch in stale.chunks(EMBED_BATCH) {
+                let texts: Vec<String> = batch.iter().map(|p| p.text.clone()).collect();
+                let vectors = self.embedder.embed(&texts)?;
+                let given: Vec<_> = batch.iter().map(|p| p.id).zip(vectors).collect();
+                self.store.set_vectors(&given, self.embedder.model())?;
+                report.reembedded_passages += batch.len();
+            }
+            span.set("recut", report.recut as i64);
+            span.set("reembedded", report.reembedded_passages as i64);
+            Ok(report)
+        })
     }
 
     pub fn ask(&self, notebook: NotebookId, question: &str) -> Result<Answer> {
@@ -419,6 +506,113 @@ mod tests {
         let prompt = prompts.lock().unwrap()[0].clone();
         assert!(prompt.contains("договор.txt"));
         assert!(!prompt.contains("молоко"));
+    }
+
+    struct NoModel;
+    impl Llm for NoModel {
+        fn complete(&self, _: &str) -> Result<String> {
+            Err(Error::ModelUnavailable("not needed".into()))
+        }
+    }
+
+    fn with_chunker(store: &Arc<Store>, target: usize) -> Notebooks {
+        Notebooks::new(
+            store.clone(),
+            Box::new(crate::chunk::ParagraphChunker { target }),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(Bm25Retriever::new(store.clone())),
+            Box::new(NoModel),
+        )
+    }
+
+    #[test]
+    fn reindexing_cuts_the_kept_texts_again_and_embeds_the_sources_that_have_none() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let nb = store.create_notebook("n").unwrap();
+        let text = "Первый абзац.\n\nВторой абзац.\n\nТретий абзац.";
+        with_chunker(&store, 15)
+            .add_source(nb, "a.txt", text)
+            .unwrap();
+        assert_eq!(store.source_passages(nb, Some("a.txt")).unwrap().len(), 3);
+        // A source from before texts were kept, with a vector of another model.
+        store
+            .add_source(
+                nb,
+                "old.txt",
+                &[NewPassage {
+                    ordinal: 0,
+                    text: "Старый текст.".into(),
+                    embedding: Some(vec![1.0]),
+                }],
+                "other-model",
+            )
+            .unwrap();
+
+        let report = with_chunker(&store, 900).reindex(nb).unwrap();
+
+        assert_eq!(store.source_passages(nb, Some("a.txt")).unwrap().len(), 1);
+        assert_eq!(report.recut, 1);
+        assert_eq!(report.reembedded_passages, 1);
+        assert_eq!(report.without_text, ["old.txt"]);
+        assert!(
+            store
+                .passages_without_vectors_of(nb, "hashing-512")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_folder_becomes_one_source_per_file_and_a_bad_file_does_not_stop_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "Первый файл.").unwrap();
+        std::fs::write(dir.path().join("sub/b.md"), "# Второй\n\nФайл.").unwrap();
+        std::fs::write(dir.path().join("bad.pdf"), "это не PDF").unwrap();
+        std::fs::write(dir.path().join("pic.png"), "не источник").unwrap();
+        let store = Arc::new(Store::in_memory().unwrap());
+        let nb = store.create_notebook("n").unwrap();
+
+        let report = with_chunker(&store, 900)
+            .add_location(nb, dir.path().to_str().unwrap(), &Sources::standard())
+            .unwrap();
+
+        let added: Vec<&str> = report.added.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(added, ["a.txt", "sub/b.md"]);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, "bad.pdf");
+        assert_eq!(store.source_titles(nb).unwrap(), ["a.txt", "sub/b.md"]);
+    }
+
+    #[test]
+    fn a_single_file_is_added_as_before_and_its_error_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("one.txt");
+        std::fs::write(&file, "Один файл.").unwrap();
+        let store = Arc::new(Store::in_memory().unwrap());
+        let nb = store.create_notebook("n").unwrap();
+        let notebooks = with_chunker(&store, 900);
+
+        let report = notebooks
+            .add_location(nb, file.to_str().unwrap(), &Sources::standard())
+            .unwrap();
+        assert_eq!(report.added, [("one.txt".to_string(), 1)]);
+
+        let missing = dir.path().join("missing.txt");
+        assert!(
+            notebooks
+                .add_location(nb, missing.to_str().unwrap(), &Sources::standard())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn reindexing_an_empty_notebook_does_nothing() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let nb = store.create_notebook("n").unwrap();
+        let report = with_chunker(&store, 900).reindex(nb).unwrap();
+        assert_eq!((report.recut, report.reembedded_passages), (0, 0));
+        assert!(report.without_text.is_empty());
     }
 
     fn chat_notebooks(prompts: &Arc<Mutex<Vec<String>>>) -> (Notebooks, NotebookId) {

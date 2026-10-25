@@ -148,6 +148,8 @@ body { display: flex; flex-direction: column; }
 .sources .list { flex: 1; }
 
 .inline-form { display: flex; gap: 6px; }
+.pick-row { display: flex; gap: 6px; }
+.pick-row button:first-child { flex: 1; }
 
 .studio .tile { text-align: left; padding: 14px; border-radius: 12px; background: var(--bg); }
 .studio .hint { margin: 0; }

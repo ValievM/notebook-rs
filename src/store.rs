@@ -66,7 +66,7 @@ pub struct Store {
     vectors: RwLock<VectorCache>,
 }
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 const CACHE_LOCK: &str = "the cache lock is never held across a panic";
 
 impl Store {
@@ -85,6 +85,7 @@ impl Store {
                id INTEGER PRIMARY KEY,
                notebook_id INTEGER NOT NULL REFERENCES notebook(id),
                title TEXT NOT NULL,
+               text TEXT,
                UNIQUE (notebook_id, title));
              CREATE TABLE IF NOT EXISTS passage (
                id INTEGER PRIMARY KEY,
@@ -135,9 +136,69 @@ impl Store {
         passages: &[NewPassage],
         model: &str,
     ) -> Result<usize> {
-        let count = self.write_source(notebook, title, passages, model)?;
+        let count = self.write_source(notebook, title, passages, model, None)?;
         self.forget_vectors();
         Ok(count)
+    }
+
+    /// Like `add_source`, and keeps the text the passages were cut from, so that the source can
+    /// be cut again (`reindex`) without the file or the page.
+    pub fn add_source_with_text(
+        &self,
+        notebook: NotebookId,
+        title: &str,
+        passages: &[NewPassage],
+        model: &str,
+        text: &str,
+    ) -> Result<usize> {
+        let count = self.write_source(notebook, title, passages, model, Some(text))?;
+        self.forget_vectors();
+        Ok(count)
+    }
+
+    /// The kept text of every source of the notebook, in the order they were added; `None` for
+    /// a source added before texts were kept.
+    pub fn source_texts(&self, notebook: NotebookId) -> Result<Vec<(String, Option<String>)>> {
+        let db = self.db();
+        let mut statement =
+            db.prepare("SELECT title, text FROM source WHERE notebook_id = ?1 ORDER BY id")?;
+        let rows = statement.query_map([notebook.0], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Passages of the notebook that have no vector from `model` (none at all, or another
+    /// model's), in reading order.
+    pub fn passages_without_vectors_of(
+        &self,
+        notebook: NotebookId,
+        model: &str,
+    ) -> Result<Vec<Passage>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT p.id, s.title, p.ordinal, p.text
+             FROM passage p JOIN source s ON s.id = p.source_id
+             WHERE s.notebook_id = ?1 AND (p.embedding IS NULL OR p.embedding_model IS NOT ?2)
+             ORDER BY s.id, p.ordinal",
+        )?;
+        let rows = statement.query_map(params![notebook.0, model], passage_from_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Gives passages new vectors made by `model`.
+    pub fn set_vectors(&self, vectors: &[(PassageId, Vec<f32>)], model: &str) -> Result<()> {
+        {
+            let db = self.db();
+            let tx = db.unchecked_transaction()?;
+            for (id, vector) in vectors {
+                tx.execute(
+                    "UPDATE passage SET embedding = ?1, embedding_model = ?2 WHERE id = ?3",
+                    params![encode(vector), model, id.0],
+                )?;
+            }
+            tx.commit()?;
+        }
+        self.forget_vectors();
+        Ok(())
     }
 
     fn write_source(
@@ -146,6 +207,7 @@ impl Store {
         title: &str,
         passages: &[NewPassage],
         model: &str,
+        text: Option<&str>,
     ) -> Result<usize> {
         let db = self.db();
         let tx = db.unchecked_transaction()?;
@@ -160,8 +222,8 @@ impl Store {
             remove_source_rows(&tx, id)?;
         }
         tx.execute(
-            "INSERT INTO source(notebook_id, title) VALUES (?1, ?2)",
-            params![notebook.0, title],
+            "INSERT INTO source(notebook_id, title, text) VALUES (?1, ?2, ?3)",
+            params![notebook.0, title, text],
         )?;
         let source_id = tx.last_insert_rowid();
         for passage in passages {
@@ -433,6 +495,16 @@ fn migrate(db: &Connection) -> Result<()> {
                 "ALTER TABLE passage ADD COLUMN embedding BLOB;
                  ALTER TABLE passage ADD COLUMN embedding_model TEXT;",
             )?;
+        }
+    }
+    if version < 2 {
+        // Sources added before this version have no kept text: they can be re-embedded, but
+        // not cut again.
+        let has_text = db
+            .prepare("SELECT 1 FROM pragma_table_info('source') WHERE name = 'text'")?
+            .exists([])?;
+        if !has_text {
+            db.execute_batch("ALTER TABLE source ADD COLUMN text TEXT;")?;
         }
     }
     db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -767,6 +839,62 @@ mod tests {
     }
 
     #[test]
+    fn a_source_keeps_the_text_it_was_cut_from_and_a_new_version_replaces_it() {
+        let store = Store::in_memory().unwrap();
+        let nb = store.create_notebook("n").unwrap();
+        store
+            .add_source_with_text(nb, "a.txt", &[passage(0, "один", None)], "m", "один два")
+            .unwrap();
+        store
+            .add_source(nb, "b.txt", &[passage(0, "без текста", None)], "m")
+            .unwrap();
+        assert_eq!(
+            store.source_texts(nb).unwrap(),
+            [
+                ("a.txt".to_string(), Some("один два".to_string())),
+                ("b.txt".to_string(), None)
+            ]
+        );
+
+        store
+            .add_source_with_text(nb, "a.txt", &[passage(0, "три", None)], "m", "три")
+            .unwrap();
+        assert_eq!(store.source_texts(nb).unwrap()[1].1.as_deref(), Some("три"));
+    }
+
+    #[test]
+    fn passages_of_another_model_are_found_and_take_new_vectors() {
+        let store = Store::in_memory().unwrap();
+        let nb = store.create_notebook("n").unwrap();
+        store
+            .add_source(
+                nb,
+                "a.txt",
+                &[
+                    passage(0, "старое", Some(vec![1.0])),
+                    passage(1, "без", None),
+                ],
+                "old",
+            )
+            .unwrap();
+        assert!(store.passages_without_vectors_of(nb, "old").unwrap().len() == 1);
+
+        let stale = store.passages_without_vectors_of(nb, "new").unwrap();
+        assert_eq!(stale.len(), 2);
+        let vectors: Vec<_> = stale.iter().map(|p| (p.id, vec![0.5])).collect();
+        store.set_vectors(&vectors, "new").unwrap();
+
+        assert!(
+            store
+                .passages_without_vectors_of(nb, "new")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.embedded_passages(nb, "new").unwrap().len(), 2);
+        assert!(store.embedded_passages(nb, "old").unwrap().is_empty());
+    }
+
+    #[test]
     fn a_file_from_the_first_prototype_is_upgraded_and_keeps_its_data() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("old.db");
@@ -786,5 +914,9 @@ mod tests {
         store
             .add_source(nb, "a.txt", &[passage(0, "текст", Some(vec![1.0]))], "m")
             .unwrap();
+        store
+            .add_source_with_text(nb, "b.txt", &[passage(0, "ещё", None)], "m", "ещё")
+            .unwrap();
+        assert_eq!(store.source_texts(nb).unwrap()[1].1.as_deref(), Some("ещё"));
     }
 }

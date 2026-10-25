@@ -5,7 +5,7 @@ use notebook_rs::answer::{Answer, Citation};
 use notebook_rs::chatgpt::ModelEntry;
 use notebook_rs::error::Error;
 use notebook_rs::metrics::Summary;
-use notebook_rs::service::HistoryEntry;
+use notebook_rs::service::{AddReport, HistoryEntry};
 use notebook_rs::settings::{EFFORTS, Settings};
 use notebook_rs::store::{NotebookInfo, SourceInfo};
 use notebook_rs::view::PassageView;
@@ -41,6 +41,42 @@ pub struct AnswerDto {
     pub text: String,
     pub citations: Vec<CitationDto>,
     pub rejected_quotes: usize,
+}
+
+/// What adding a file, a page or a folder did.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct AddedDto {
+    pub added: Vec<AddedSourceDto>,
+    pub failed: Vec<FailedSourceDto>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct AddedSourceDto {
+    pub title: String,
+    pub passages: usize,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct FailedSourceDto {
+    pub title: String,
+    pub message: String,
+}
+
+impl From<AddReport> for AddedDto {
+    fn from(report: AddReport) -> Self {
+        Self {
+            added: report
+                .added
+                .into_iter()
+                .map(|(title, passages)| AddedSourceDto { title, passages })
+                .collect(),
+            failed: report
+                .failed
+                .into_iter()
+                .map(|(title, message)| FailedSourceDto { title, message })
+                .collect(),
+        }
+    }
 }
 
 /// One message of the dialog of a notebook: the person's or the assistant's.

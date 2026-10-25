@@ -78,9 +78,12 @@ fn embedder(kind: EmbedderKind, db_path: &std::path::Path) -> Result<Arc<dyn Emb
 
 #[derive(Subcommand)]
 enum Command {
-    /// Add a source: a text or Markdown file, a PDF file, or a web address (http/https).
-    /// The same title replaces the old source.
+    /// Add a source: a text or Markdown file, a PDF file, a web address (http/https), or a
+    /// folder (every such file in it and its subfolders). The same title replaces the old source.
     Add { notebook: String, location: String },
+    /// Cut the sources of a notebook again and embed them again (after the way of cutting or
+    /// the embedding model changed)
+    Reindex { notebook: String },
     /// Ask a question; the answer uses only this notebook's sources.
     Ask {
         notebook: String,
@@ -196,14 +199,31 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Add { notebook, location } => {
             let id = notebooks.notebook(&notebook)?;
-            let document = Sources::standard()
-                .with_metrics(metrics.clone())
-                .read(&location)?;
-            let count = notebooks.add_source(id, &document.title, &document.text)?;
+            let sources = Sources::standard().with_metrics(metrics.clone());
+            let report = notebooks.add_location(id, &location, &sources)?;
+            for (title, count) in &report.added {
+                println!("«{title}» добавлен в «{notebook}»: {count} фрагментов.");
+            }
+            for (title, error) in &report.failed {
+                eprintln!("«{title}» не добавлен: {error}");
+            }
+            if !report.failed.is_empty() {
+                anyhow::bail!("не добавлено файлов: {}", report.failed.len());
+            }
+        }
+        Command::Reindex { notebook } => {
+            let id = notebooks.notebook(&notebook)?;
+            let report = notebooks.reindex(id)?;
             println!(
-                "«{}» добавлен в «{notebook}»: {count} фрагментов.",
-                document.title
+                "Источников нарезано заново: {}. Фрагментов получили новые векторы: {}.",
+                report.recut, report.reembedded_passages
             );
+            if !report.without_text.is_empty() {
+                println!(
+                    "Не нарезаны заново (добавлены до сохранения текста, добавьте их ещё раз): {}.",
+                    report.without_text.join(", ")
+                );
+            }
         }
         Command::Ask {
             notebook,

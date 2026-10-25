@@ -6,6 +6,7 @@
 //! aimed at the model). The prompt tells the model to answer only from the passages, and every
 //! citation is checked against them, but the text itself is never treated as instructions.
 
+pub mod folder;
 mod pdf;
 mod text;
 mod web;

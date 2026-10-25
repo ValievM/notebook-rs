@@ -31,8 +31,11 @@
   <div class="app">
     <section class="sources panel" aria-label="Источники">
       <h2>Источники</h2>
-      <div id="drop" class="drop">Перетащите сюда файлы: текст, Markdown, PDF</div>
-      <button id="pick-files" type="button">Добавить файлы…</button>
+      <div id="drop" class="drop">Перетащите сюда файлы или папку: текст, Markdown, PDF</div>
+      <div class="pick-row">
+        <button id="pick-files" type="button">Добавить файлы…</button>
+        <button id="pick-folder" type="button">Папку…</button>
+      </div>
       <form id="add-url" class="inline-form">
         <input id="url" type="url" placeholder="Адрес страницы https://…" aria-label="Адрес веб-страницы" autocomplete="off">
         <button type="submit">Добавить</button>

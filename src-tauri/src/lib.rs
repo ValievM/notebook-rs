@@ -5,8 +5,8 @@
 mod dto;
 
 use dto::{
-    AccountDto, AnswerDto, HistoryEntryDto, ModelStateDto, NotebookDto, PassageViewDto, SourceDto,
-    StatusDto, SummaryDto, user_message,
+    AccountDto, AddedDto, AnswerDto, HistoryEntryDto, ModelStateDto, NotebookDto, PassageViewDto,
+    SourceDto, StatusDto, SummaryDto, user_message,
 };
 use notebook_rs::chatgpt::{ChatGptAccount, open_in_browser};
 use notebook_rs::domain::NotebookId;
@@ -250,7 +250,7 @@ async fn add_source(
     engine: State<'_, Engine>,
     notebook_id: i64,
     location: String,
-) -> Result<usize, String> {
+) -> Result<AddedDto, String> {
     eprintln!("notebook-rs: add_source requested for {location:?}");
     let notebooks = engine
         .get()
@@ -258,14 +258,17 @@ async fn add_source(
     let metrics = engine.telemetry.metrics.clone();
     let subject = Some(location.clone());
     let result = blocking(&engine, Some("command.add_source"), subject, move || {
-        let document = Sources::standard()
-            .with_metrics(metrics)
-            .read(location.trim())?;
-        notebooks.add_source(NotebookId(notebook_id), &document.title, &document.text)
+        let sources = Sources::standard().with_metrics(metrics);
+        let report = notebooks.add_location(NotebookId(notebook_id), location.trim(), &sources)?;
+        Ok(AddedDto::from(report))
     })
     .await;
     match &result {
-        Ok(count) => eprintln!("notebook-rs: added, {count} passages"),
+        Ok(added) => eprintln!(
+            "notebook-rs: added {} sources, {} failed",
+            added.added.len(),
+            added.failed.len()
+        ),
         Err(message) => eprintln!("notebook-rs: not added: {message}"),
     }
     result
@@ -711,7 +714,10 @@ mod ipc_tests {
             "add_source",
             json!({"notebookId": id, "location": file.to_str().unwrap()}),
         );
-        assert_eq!(added.unwrap(), json!(1));
+        assert_eq!(
+            added.unwrap(),
+            json!({"added": [{"title": "договор.txt", "passages": 1}], "failed": []})
+        );
         let sources = call(&window, "list_sources", json!({"notebookId": id})).unwrap();
         assert_eq!(sources, json!([{"title": "договор.txt", "passages": 1}]));
 
@@ -795,7 +801,29 @@ mod ipc_tests {
             "add_source",
             json!({"notebookId": id, "location": pasted}),
         );
-        assert_eq!(added.unwrap(), json!(1));
+        assert_eq!(added.unwrap()["added"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_folder_is_added_file_by_file_and_the_failures_come_back_with_their_reasons() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("папка");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("а.txt"), "Первый.").unwrap();
+        std::fs::write(folder.join("сломан.pdf"), "не PDF").unwrap();
+        let window = window(measured_engine(directory.path()));
+        let id = call(&window, "create_notebook", json!({"name": "n"})).unwrap()["id"].clone();
+
+        let result = call(
+            &window,
+            "add_source",
+            json!({"notebookId": id, "location": folder.to_str().unwrap()}),
+        )
+        .unwrap();
+
+        assert_eq!(result["added"], json!([{"title": "а.txt", "passages": 1}]));
+        assert_eq!(result["failed"][0]["title"], "сломан.pdf");
+        assert!(result["failed"][0]["message"].as_str().unwrap().len() > 5);
     }
 
     /// An engine whose measurements go to a real metrics file in `directory`.

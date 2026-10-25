@@ -17,6 +17,7 @@ async function loadApi() {
         });
         return chosen ? [].concat(chosen) : [];
       },
+      pickFolder: async () => (await tauri.dialog.open({ directory: true })) ?? null,
       onDrop: (handler) => tauri.webview.getCurrentWebview().onDragDropEvent((event) => handler(event.payload)),
     };
   }
@@ -80,7 +81,7 @@ function banner(message, kind = 'info') {
 function working(delta) {
   state.working += delta;
   const busy = state.working > 0 || !state.ready;
-  for (const id of ['send', 'summarize', 'compare', 'pick-files']) $(id).disabled = busy;
+  for (const id of ['send', 'summarize', 'compare', 'pick-files', 'pick-folder']) $(id).disabled = busy;
   if (!busy) renderSelection();
 }
 
@@ -288,8 +289,13 @@ async function addLocations(locations) {
       const name = location.split(/[\\/]/).pop();
       sourceStatus(`Добавляю «${name}»…`);
       try {
-        const count = await api.invoke('add_source', { notebookId: state.current, location });
-        toast(`«${name}»: добавлено, ${count} фрагм.`);
+        const result = await api.invoke('add_source', { notebookId: state.current, location });
+        for (const failed of result.failed) failures.push(`«${failed.title}»: ${failed.message}`);
+        const [only] = result.added;
+        toast(result.added.length === 1
+          ? `«${only.title}»: добавлено, ${only.passages} фрагм.`
+          : `«${name}»: добавлено источников: ${result.added.length}${result.failed.length ? `, не добавлено: ${result.failed.length}` : ''}`,
+        result.failed.length ? 'error' : undefined);
       } catch (error) {
         failures.push(`«${name}»: ${error}`);
         toast(String(error), 'error');
@@ -307,6 +313,11 @@ async function addLocations(locations) {
 $('pick-files').addEventListener('click', async () => {
   const files = await api.pickFiles();
   if (files.length) await addLocations(files);
+});
+
+$('pick-folder').addEventListener('click', async () => {
+  const folder = await api.pickFolder();
+  if (folder) await addLocations([folder]);
 });
 
 $('add-url').addEventListener('submit', async (event) => {
