@@ -1,27 +1,29 @@
-//! Notebooks, sources and their passages, in one SQLite file, searched with FTS5 (BM25).
+//! Notebooks, sources and their passages in one SQLite file: text searched with FTS5 (BM25),
+//! vectors kept next to the passages. This is the only module that knows SQL.
 
-use crate::chunk::{self, Chunk};
-use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use crate::domain::{NotebookId, Passage, PassageId};
+use crate::error::Result;
+use rusqlite::{Connection, params};
 use std::path::Path;
+use std::sync::Mutex;
 
-const TARGET_CHUNK_CHARS: usize = 900;
-
-/// A passage found for a question, with where it came from.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Passage {
-    pub source_title: String,
+/// A passage on its way in: text, and the vector if one was made.
+pub struct NewPassage {
     pub ordinal: usize,
     pub text: String,
+    pub embedding: Option<Vec<f32>>,
 }
 
+/// A repository over one SQLite connection. The lock makes it safe to share between threads.
 pub struct Store {
-    db: Connection,
+    db: Mutex<Connection>,
 }
+
+const SCHEMA_VERSION: i32 = 1;
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        Self::from_connection(Connection::open(path).context("cannot open the notebook file")?)
+        Self::from_connection(Connection::open(path)?)
     }
 
     pub fn in_memory() -> Result<Self> {
@@ -44,25 +46,42 @@ impl Store {
              CREATE VIRTUAL TABLE IF NOT EXISTS passage_index USING fts5(
                text, content='passage', content_rowid='id', tokenize='unicode61 remove_diacritics 2');",
         )?;
-        Ok(Self { db })
+        migrate(&db)?;
+        Ok(Self { db: Mutex::new(db) })
     }
 
-    pub fn create_notebook(&self, name: &str) -> Result<i64> {
+    fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.db
-            .execute("INSERT OR IGNORE INTO notebook(name) VALUES (?1)", [name])?;
-        Ok(self
-            .db
-            .query_row("SELECT id FROM notebook WHERE name = ?1", [name], |r| r.get(0))?)
+            .lock()
+            .expect("the database lock is never held across a panic")
+    }
+
+    /// Finds the notebook by name or creates it.
+    pub fn create_notebook(&self, name: &str) -> Result<NotebookId> {
+        let db = self.db();
+        db.execute("INSERT OR IGNORE INTO notebook(name) VALUES (?1)", [name])?;
+        Ok(NotebookId(db.query_row(
+            "SELECT id FROM notebook WHERE name = ?1",
+            [name],
+            |r| r.get(0),
+        )?))
     }
 
     /// Adds a source, or replaces it if one with the same title is already there (no copies).
-    pub fn add_source(&mut self, notebook: i64, title: &str, text: &str) -> Result<usize> {
-        let chunks = chunk::split(text, TARGET_CHUNK_CHARS);
-        let tx = self.db.transaction()?;
+    /// `model` names the embedding model of the vectors in `passages`.
+    pub fn add_source(
+        &self,
+        notebook: NotebookId,
+        title: &str,
+        passages: &[NewPassage],
+        model: &str,
+    ) -> Result<usize> {
+        let db = self.db();
+        let tx = db.unchecked_transaction()?;
         let old: Option<i64> = tx
             .query_row(
                 "SELECT id FROM source WHERE notebook_id = ?1 AND title = ?2",
-                params![notebook, title],
+                params![notebook.0, title],
                 |r| r.get(0),
             )
             .ok();
@@ -77,122 +96,211 @@ impl Store {
         }
         tx.execute(
             "INSERT INTO source(notebook_id, title) VALUES (?1, ?2)",
-            params![notebook, title],
+            params![notebook.0, title],
         )?;
         let source_id = tx.last_insert_rowid();
-        for Chunk { ordinal, text } in &chunks {
+        for passage in passages {
+            let blob = passage.embedding.as_deref().map(encode);
             tx.execute(
-                "INSERT INTO passage(source_id, ordinal, text) VALUES (?1, ?2, ?3)",
-                params![source_id, *ordinal as i64, text],
+                "INSERT INTO passage(source_id, ordinal, text, embedding, embedding_model)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    source_id,
+                    passage.ordinal as i64,
+                    passage.text,
+                    blob,
+                    blob.as_ref().map(|_| model)
+                ],
             )?;
             let id = tx.last_insert_rowid();
             tx.execute(
                 "INSERT INTO passage_index(rowid, text) VALUES (?1, ?2)",
-                params![id, text],
+                params![id, passage.text],
             )?;
         }
         tx.commit()?;
-        Ok(chunks.len())
+        Ok(passages.len())
     }
 
-    pub fn source_count(&self, notebook: i64) -> Result<usize> {
-        Ok(self.db.query_row(
+    pub fn source_count(&self, notebook: NotebookId) -> Result<usize> {
+        Ok(self.db().query_row(
             "SELECT COUNT(*) FROM source WHERE notebook_id = ?1",
-            [notebook],
+            [notebook.0],
             |r| r.get::<_, i64>(0),
         )? as usize)
     }
 
-    /// The best `limit` passages for a question, best first. Only this notebook is searched.
-    pub fn search(&self, notebook: i64, question: &str, limit: usize) -> Result<Vec<Passage>> {
-        let Some(query) = fts_query(question) else {
-            return Ok(Vec::new());
-        };
-        let mut statement = self.db.prepare(
-            "SELECT s.title, p.ordinal, p.text
+    /// Passages matching an FTS5 query, best first. Only this notebook is searched.
+    pub fn search_text(
+        &self,
+        notebook: NotebookId,
+        fts_query: &str,
+        limit: usize,
+    ) -> Result<Vec<Passage>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT p.id, s.title, p.ordinal, p.text
              FROM passage_index
              JOIN passage p ON p.id = passage_index.rowid
              JOIN source s ON s.id = p.source_id
              WHERE passage_index MATCH ?1 AND s.notebook_id = ?2
              ORDER BY bm25(passage_index) LIMIT ?3",
         )?;
-        let rows = statement.query_map(params![query, notebook, limit as i64], |r| {
-            Ok(Passage {
-                source_title: r.get(0)?,
-                ordinal: r.get::<_, i64>(1)? as usize,
-                text: r.get(2)?,
-            })
+        let rows = statement.query_map(
+            params![fts_query, notebook.0, limit as i64],
+            passage_from_row,
+        )?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Every passage of the notebook that has a vector from `model`.
+    pub fn embedded_passages(
+        &self,
+        notebook: NotebookId,
+        model: &str,
+    ) -> Result<Vec<(Passage, Vec<f32>)>> {
+        let db = self.db();
+        let mut statement = db.prepare(
+            "SELECT p.id, s.title, p.ordinal, p.text, p.embedding
+             FROM passage p JOIN source s ON s.id = p.source_id
+             WHERE s.notebook_id = ?1 AND p.embedding_model = ?2",
+        )?;
+        let rows = statement.query_map(params![notebook.0, model], |r| {
+            Ok((passage_from_row(r)?, decode(&r.get::<_, Vec<u8>>(4)?)))
         })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 }
 
-/// Words of the question as prefix terms. Long words are cut a little so that
-/// "договору" also finds "договор" and "договоре": a cheap stand-in for stemming.
-fn fts_query(question: &str) -> Option<String> {
-    let terms: Vec<String> = question
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.chars().count() >= 3)
-        .map(|w| {
-            let word = w.to_lowercase();
-            let length = word.chars().count();
-            let keep = if length > 5 { length - 2 } else { length };
-            format!("\"{}\"*", word.chars().take(keep).collect::<String>())
-        })
-        .collect();
-    (!terms.is_empty()).then(|| terms.join(" OR "))
+fn passage_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Passage> {
+    Ok(Passage {
+        id: PassageId(r.get(0)?),
+        source_title: r.get(1)?,
+        ordinal: r.get::<_, i64>(2)? as usize,
+        text: r.get(3)?,
+    })
+}
+
+/// Files made by the first prototype have no vector columns: add them, keep the data.
+fn migrate(db: &Connection) -> Result<()> {
+    let version: i32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 1 {
+        let has_vectors = db
+            .prepare("SELECT 1 FROM pragma_table_info('passage') WHERE name = 'embedding'")?
+            .exists([])?;
+        if !has_vectors {
+            db.execute_batch(
+                "ALTER TABLE passage ADD COLUMN embedding BLOB;
+                 ALTER TABLE passage ADD COLUMN embedding_model TEXT;",
+            )?;
+        }
+    }
+    db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn encode(vector: &[f32]) -> Vec<u8> {
+    vector.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+fn decode(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn store_with_sources() -> (Store, i64) {
-        let mut store = Store::in_memory().unwrap();
-        let notebook = store.create_notebook("Диплом").unwrap();
-        store
-            .add_source(notebook, "договор.txt", "Срок действия договора составляет два года.\n\nОплата производится ежемесячно.")
-            .unwrap();
-        store
-            .add_source(notebook, "заметки.txt", "Купить молоко и хлеб.\n\nПозвонить научному руководителю.")
-            .unwrap();
-        (store, notebook)
+    fn passage(ordinal: usize, text: &str, embedding: Option<Vec<f32>>) -> NewPassage {
+        NewPassage {
+            ordinal,
+            text: text.into(),
+            embedding,
+        }
     }
 
     #[test]
-    fn finds_the_passage_that_answers_the_question_even_in_another_word_form() {
-        let (store, notebook) = store_with_sources();
-        let found = store.search(notebook, "Какой срок у договору?", 3).unwrap();
-        assert_eq!(found[0].source_title, "договор.txt");
-        assert!(found[0].text.contains("два года"));
-    }
-
-    #[test]
-    fn searches_only_the_chosen_notebook() {
-        let (mut store, notebook) = store_with_sources();
+    fn finds_text_only_in_the_chosen_notebook() {
+        let store = Store::in_memory().unwrap();
+        let mine = store.create_notebook("Диплом").unwrap();
         let other = store.create_notebook("Другое").unwrap();
-        store.add_source(other, "чужое.txt", "Срок годности продукта: неделя.").unwrap();
-        let found = store.search(notebook, "срок", 5).unwrap();
-        assert!(found.iter().all(|p| p.source_title != "чужое.txt"));
-    }
-
-    #[test]
-    fn adding_the_same_title_again_replaces_it_without_copies() {
-        let (mut store, notebook) = store_with_sources();
         store
-            .add_source(notebook, "договор.txt", "Срок действия договора составляет пять лет.")
+            .add_source(
+                mine,
+                "a.txt",
+                &[passage(0, "Срок действия договора два года", None)],
+                "m",
+            )
             .unwrap();
-        assert_eq!(store.source_count(notebook).unwrap(), 2);
-        let found = store.search(notebook, "срок договора", 5).unwrap();
-        let texts: Vec<&str> = found.iter().map(|p| p.text.as_str()).collect();
-        assert!(texts.iter().any(|t| t.contains("пять лет")));
-        assert!(texts.iter().all(|t| !t.contains("два года")));
+        store
+            .add_source(
+                other,
+                "b.txt",
+                &[passage(0, "Срок годности неделя", None)],
+                "m",
+            )
+            .unwrap();
+        let found = store.search_text(mine, "\"срок\"*", 5).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source_title, "a.txt");
     }
 
     #[test]
-    fn returns_nothing_for_a_question_without_searchable_words() {
-        let (store, notebook) = store_with_sources();
-        assert!(store.search(notebook, "? !", 3).unwrap().is_empty());
-        assert!(store.search(notebook, "квантовая хромодинамика", 3).unwrap().is_empty());
+    fn the_same_title_replaces_the_source_without_copies() {
+        let store = Store::in_memory().unwrap();
+        let nb = store.create_notebook("n").unwrap();
+        store
+            .add_source(nb, "a.txt", &[passage(0, "два года", None)], "m")
+            .unwrap();
+        store
+            .add_source(nb, "a.txt", &[passage(0, "пять лет", None)], "m")
+            .unwrap();
+        assert_eq!(store.source_count(nb).unwrap(), 1);
+        assert!(store.search_text(nb, "\"два\"*", 5).unwrap().is_empty());
+        assert_eq!(store.search_text(nb, "\"пять\"*", 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn vectors_round_trip_and_are_returned_only_for_their_own_model() {
+        let store = Store::in_memory().unwrap();
+        let nb = store.create_notebook("n").unwrap();
+        store
+            .add_source(
+                nb,
+                "a.txt",
+                &[passage(0, "текст", Some(vec![0.25, -1.5]))],
+                "model-a",
+            )
+            .unwrap();
+        let found = store.embedded_passages(nb, "model-a").unwrap();
+        assert_eq!(found[0].1, vec![0.25, -1.5]);
+        assert!(store.embedded_passages(nb, "model-b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_file_from_the_first_prototype_is_upgraded_and_keeps_its_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("old.db");
+        {
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE notebook (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+                 CREATE TABLE source (id INTEGER PRIMARY KEY, notebook_id INTEGER NOT NULL, title TEXT NOT NULL, UNIQUE (notebook_id, title));
+                 CREATE TABLE passage (id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL, ordinal INTEGER NOT NULL, text TEXT NOT NULL);
+                 INSERT INTO notebook VALUES (1, 'старый');",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let nb = store.create_notebook("старый").unwrap();
+        assert_eq!(nb, NotebookId(1));
+        store
+            .add_source(nb, "a.txt", &[passage(0, "текст", Some(vec![1.0]))], "m")
+            .unwrap();
     }
 }

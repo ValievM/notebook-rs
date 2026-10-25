@@ -4,9 +4,9 @@
 //! A quote that is not really in the passage it names is dropped and reported: a citation that
 //! cannot be found is worse than no citation.
 
+use crate::domain::Passage;
+use crate::error::{Error, Result};
 use crate::llm::Llm;
-use crate::store::Passage;
-use anyhow::Result;
 use serde::Deserialize;
 
 #[derive(Debug, PartialEq)]
@@ -68,9 +68,11 @@ pub fn ask(llm: &dyn Llm, question: &str, passages: &[Passage]) -> Result<Answer
 }
 
 pub fn parse(raw: &str, passages: &[Passage]) -> Result<Answer> {
-    let start = raw.find('{').ok_or_else(|| anyhow::anyhow!("the model did not return JSON"))?;
-    let end = raw.rfind('}').ok_or_else(|| anyhow::anyhow!("the model did not return JSON"))?;
-    let reply: Reply = serde_json::from_str(&raw[start..=end])?;
+    let no_json = || Error::BadReply("no JSON object in the reply".into());
+    let start = raw.find('{').ok_or_else(no_json)?;
+    let end = raw.rfind('}').ok_or_else(no_json)?;
+    let reply: Reply =
+        serde_json::from_str(&raw[start..=end]).map_err(|e| Error::BadReply(e.to_string()))?;
     let mut citations = Vec::new();
     let mut rejected_quotes = 0;
     for cited in reply.citations {
@@ -84,11 +86,18 @@ pub fn parse(raw: &str, passages: &[Passage]) -> Result<Answer> {
             _ => rejected_quotes += 1,
         }
     }
-    Ok(Answer { text: reply.answer, citations, rejected_quotes })
+    Ok(Answer {
+        text: reply.answer,
+        citations,
+        rejected_quotes,
+    })
 }
 
 fn normalize(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn contains_quote(passage: &str, quote: &str) -> bool {
@@ -99,6 +108,7 @@ fn contains_quote(passage: &str, quote: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::PassageId;
 
     struct Fake(&'static str);
     impl Llm for Fake {
@@ -109,8 +119,18 @@ mod tests {
 
     fn passages() -> Vec<Passage> {
         vec![
-            Passage { source_title: "договор.txt".into(), ordinal: 0, text: "Срок действия договора составляет два года.".into() },
-            Passage { source_title: "заметки.txt".into(), ordinal: 0, text: "Позвонить научному руководителю.".into() },
+            Passage {
+                id: PassageId(0),
+                source_title: "договор.txt".into(),
+                ordinal: 0,
+                text: "Срок действия договора составляет два года.".into(),
+            },
+            Passage {
+                id: PassageId(0),
+                source_title: "заметки.txt".into(),
+                ordinal: 0,
+                text: "Позвонить научному руководителю.".into(),
+            },
         ]
     }
 
@@ -124,7 +144,8 @@ mod tests {
 
     #[test]
     fn keeps_a_citation_whose_quote_is_really_in_the_passage() {
-        let reply = r#"{"answer":"Два года [1].","citations":[{"n":1,"quote":"составляет  ДВА года"}]}"#;
+        let reply =
+            r#"{"answer":"Два года [1].","citations":[{"n":1,"quote":"составляет  ДВА года"}]}"#;
         let answer = parse(reply, &passages()).unwrap();
         assert_eq!(answer.citations.len(), 1);
         assert_eq!(answer.citations[0].source_title, "договор.txt");

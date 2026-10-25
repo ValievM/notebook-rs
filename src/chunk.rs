@@ -8,6 +8,29 @@ pub struct Chunk {
     pub text: String,
 }
 
+/// How a source becomes passages. A strategy: Markdown or token-based splitting can be added
+/// next to the paragraph one without touching the callers.
+pub trait Chunker: Send + Sync {
+    fn split(&self, text: &str) -> Vec<Chunk>;
+}
+
+/// Packs paragraphs into passages of about `target` characters.
+pub struct ParagraphChunker {
+    pub target: usize,
+}
+
+impl Default for ParagraphChunker {
+    fn default() -> Self {
+        Self { target: 900 }
+    }
+}
+
+impl Chunker for ParagraphChunker {
+    fn split(&self, text: &str) -> Vec<Chunk> {
+        split(text, self.target)
+    }
+}
+
 /// Packs paragraphs into passages of about `target` characters. A paragraph is never cut in the
 /// middle unless it alone is longer than `target`; then it is split on sentence ends.
 pub fn split(text: &str, target: usize) -> Vec<Chunk> {
@@ -43,7 +66,12 @@ fn split_long(paragraph: &str, target: usize) -> Vec<String> {
     for ch in paragraph.chars() {
         sentence.push(ch);
         if matches!(ch, '.' | '!' | '?' | '…') {
-            push_sentence(&mut out, &mut current, std::mem::take(&mut sentence), target);
+            push_sentence(
+                &mut out,
+                &mut current,
+                std::mem::take(&mut sentence),
+                target,
+            );
         }
     }
     if !sentence.trim().is_empty() {
@@ -83,7 +111,11 @@ mod tests {
         assert!(chunks.len() >= 3);
         assert!(chunks.iter().all(|c| c.text.ends_with('.')));
         assert_eq!(
-            chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join(" "),
+            chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
             text
         );
     }

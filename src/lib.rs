@@ -1,4 +1,9 @@
 pub mod answer;
 pub mod chunk;
+pub mod domain;
+pub mod embed;
+pub mod error;
 pub mod llm;
+pub mod retrieve;
+pub mod service;
 pub mod store;
