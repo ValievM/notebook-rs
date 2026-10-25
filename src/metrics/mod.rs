@@ -12,9 +12,11 @@
 
 pub mod instrument;
 pub mod report;
+pub mod sampler;
 pub mod sqlite;
 
 pub use instrument::{InstrumentedEmbedder, InstrumentedLlm, InstrumentedRetriever};
+pub use sampler::MemorySampler;
 pub use sqlite::{RETENTION_DAYS, SqliteRecorder, Summary, summarize};
 
 use crate::error::Result;

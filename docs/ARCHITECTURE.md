@@ -87,6 +87,7 @@ ui/ (HTML, CSS, JS без сборщика)  --invoke-->  src-tauri/src/lib.rs (
 | `retrieve.bm25`, `retrieve.vector`, `retrieve.hybrid` | `InstrumentedRetriever` | `limit`, `results` |
 | `engine.start`, `engine.model_load` | окно / `nb` | время запуска и загрузки модели |
 | `memory.after_start`, `memory.after_add`, `memory.after_model_load` | `Metrics::sample_memory` | `rss_bytes` процесса (через `ps`) |
+| `memory.periodic` | `MemorySampler` (окно) | то же раз в 30 с, пока окно открыто: показывает тренд (растёт ли память, пока окно стоит). Поток ждёт на канале с таймаутом, поэтому остановка мгновенная; при остановке дожидается замера, который уже идёт |
 | `command.*` | команды окна | время, которое ждал человек; включает ожидание блокировки эмбеддера |
 
 Паттерны: **декоратор** (`Instrumented*` делают то же, что обёрнутое, и мерят), **порт** (`Recorder`), **внедрение часов** (`Clock`: `ManualClock` в тестах даёт точные длительности без `sleep`), **span** (замер участка: пишет и успех, и ошибку).

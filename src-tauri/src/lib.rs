@@ -10,13 +10,15 @@ use notebook_rs::embed_fast::FastEmbedder;
 use notebook_rs::error::Result as NotebookResult;
 use notebook_rs::llm::CodexExec;
 use notebook_rs::metrics::{
-    Clock, Metrics, RETENTION_DAYS, SqliteRecorder, SystemClock, summarize as summarize_metrics,
+    Clock, MemorySampler, Metrics, RETENTION_DAYS, SqliteRecorder, SystemClock,
+    summarize as summarize_metrics,
 };
 use notebook_rs::service::Notebooks;
 use notebook_rs::source::Sources;
 use notebook_rs::store::Store;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tauri::{Manager, State};
 
 /// Where measurements go (see `notebook_rs::metrics`) and where they are read from. Without a
@@ -350,6 +352,21 @@ async fn metrics_summary(engine: State<'_, Engine>, hours: u64) -> Result<Summar
     .map_err(|e| format!("Внутренняя ошибка: {e}"))?
 }
 
+/// How often the memory of the program is recorded while the window is open.
+const MEMORY_SAMPLE_EVERY: Duration = Duration::from_secs(30);
+
+/// Keeps the sampler alive for as long as the app lives (dropping it stops the thread).
+struct Sampler(#[allow(dead_code)] Option<MemorySampler>);
+
+/// Starts recording memory in the background. Without a recorder nothing would be kept, so no
+/// thread is started.
+fn start_sampler(telemetry: &Telemetry, every: Duration) -> Option<MemorySampler> {
+    telemetry.recorder.as_ref()?;
+    MemorySampler::start(telemetry.metrics.clone(), every)
+        .inspect_err(|error| eprintln!("notebook-rs: memory is not sampled: {error}"))
+        .ok()
+}
+
 /// The commands the page may call. The app and the tests build their windows from this.
 fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
@@ -374,9 +391,11 @@ pub fn run() {
         .filter(|directory| std::fs::create_dir_all(directory).is_ok())
         .map(|directory| directory.join("metrics.db"));
     let telemetry = metrics_file.map_or_else(Telemetry::default, |file| Telemetry::open(&file));
+    let sampler = start_sampler(&telemetry, MEMORY_SAMPLE_EVERY);
     configure(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
         .manage(Engine::with_telemetry(telemetry))
+        .manage(Sampler(sampler))
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
@@ -410,6 +429,35 @@ mod tests {
         let engine = Engine::default();
         let message = engine.get().err().unwrap();
         assert!(message.contains("готовится"), "{message}");
+    }
+
+    #[test]
+    fn memory_is_sampled_in_the_background_when_metrics_are_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("metrics.db");
+        let telemetry = Telemetry::open(&file);
+
+        let sampler = start_sampler(&telemetry, Duration::from_millis(5));
+
+        assert!(sampler.is_some());
+        let recorder = telemetry.recorder.clone().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut samples = 0;
+        while samples < 3 && std::time::Instant::now() < deadline {
+            recorder.flush();
+            let summary = summarize_metrics(&file, 0).unwrap();
+            samples = summary
+                .memory
+                .iter()
+                .find(|m| m.label == "periodic")
+                .map_or(0, |m| m.samples);
+        }
+        assert!(samples >= 3, "only {samples} samples were recorded");
+    }
+
+    #[test]
+    fn without_a_recorder_no_sampling_thread_is_started() {
+        assert!(start_sampler(&Telemetry::default(), Duration::from_millis(5)).is_none());
     }
 
     #[test]
