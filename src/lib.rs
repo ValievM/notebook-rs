@@ -3,6 +3,7 @@ pub mod chatgpt;
 pub mod chunk;
 pub mod chunk_markdown;
 pub mod deep;
+pub mod diagram;
 pub mod digest;
 pub mod domain;
 pub mod embed;

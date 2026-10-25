@@ -22,6 +22,8 @@ const MAX_DEPTH: usize = 4;
 const MAX_CHILDREN: usize = 8;
 const MAX_NODES: usize = 150;
 const MAX_TITLE: usize = 80;
+/// The least a part of a long material may draw, however many parts there are.
+const MIN_PART_NODES: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -91,9 +93,14 @@ pub fn mind_map(
         let raws = map_ordered(&parts, |part| ask(llm, part, &hint))
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
+        // The node limit is shared out evenly: the first part must not use it all up.
+        let share = (room / raws.len().max(1)).max(MIN_PART_NODES);
         let children = raws
             .into_iter()
-            .filter_map(|raw| clean(raw, 1, &pool, &mut room, &mut rejected))
+            .filter_map(|raw| {
+                let mut part_room = share;
+                clean(raw, 1, &pool, &mut part_room, &mut rejected)
+            })
             .collect();
         Node {
             title: title.to_string(),
@@ -347,6 +354,33 @@ mod tests {
             1 + node.children.iter().map(depth).max().unwrap_or(0)
         }
         assert_eq!(depth(&map.root), MAX_DEPTH + 1);
+    }
+
+    #[test]
+    fn every_part_gets_its_share_of_the_node_limit_so_later_parts_are_not_starved() {
+        let llm = Fake::new(|_| {
+            let leaf = |n: usize| format!(r#"{{"title":"л{n}"}}"#);
+            let level = |make: &dyn Fn(usize) -> String| -> String {
+                (0..8).map(make).collect::<Vec<_>>().join(",")
+            };
+            let branch = |_| format!(r#"{{"title":"в","children":[{}]}}"#, level(&leaf));
+            format!(r#"{{"title":"часть","children":[{}]}}"#, level(&branch))
+        });
+        let budget = Budget {
+            chars_per_call: 70,
+            max_parts: 6,
+        };
+
+        let map = mind_map(&llm, &passages(1..=8), "Блокнот", &budget).unwrap();
+
+        assert_eq!(map.root.children.len(), 4, "a branch for every part");
+        assert!(
+            map.root
+                .children
+                .iter()
+                .all(|part| !part.children.is_empty())
+        );
+        assert!(map.nodes <= MAX_NODES + 1);
     }
 
     #[test]

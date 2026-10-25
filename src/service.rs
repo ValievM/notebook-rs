@@ -5,6 +5,7 @@ use crate::answer::{self, Answer, Citation, Turn};
 use crate::chunk::Chunker;
 use crate::chunk_markdown::MarkdownChunker;
 use crate::deep;
+use crate::diagram::{self, Diagram};
 use crate::digest::{self, Budget};
 use crate::domain::{NotebookId, Passage};
 use crate::embed::Embedder;
@@ -19,6 +20,7 @@ use crate::view::{PassageView, source_view};
 use std::sync::Arc;
 
 const PASSAGES_PER_QUESTION: usize = 6;
+const PASSAGES_PER_DIAGRAM: usize = 12;
 
 /// How many earlier messages are looked at to build the dialog of a question, and how many are
 /// shown in the window.
@@ -40,6 +42,8 @@ pub struct HistoryEntry {
     pub rejected_quotes: usize,
     /// The map, for an answer of kind `mindmap`.
     pub mind_map: Option<MindMap>,
+    /// The diagram, for an answer of kind `diagram`.
+    pub diagram: Option<Diagram>,
 }
 
 /// What adding a location (a file, a page or a folder) did.
@@ -69,6 +73,8 @@ struct AnswerPayload {
     rejected_quotes: usize,
     #[serde(default)]
     mind_map: Option<MindMap>,
+    #[serde(default)]
+    diagram: Option<Diagram>,
 }
 
 /// How many passages go to the embedding model in one call. A bound on what is held and
@@ -313,6 +319,7 @@ impl Notebooks {
             citations: answer.citations.clone(),
             rejected_quotes: answer.rejected_quotes,
             mind_map: None,
+            diagram: None,
         };
         self.keep(notebook, kind, question, &answer.text, payload)
     }
@@ -331,6 +338,32 @@ impl Notebooks {
         self.store
             .add_message(notebook, "assistant", kind, reply, &payload)?;
         Ok(())
+    }
+
+    /// A diagram of a topic (boxes and arrows) from the passages found for it, kept in the
+    /// dialog.
+    pub fn diagram(&self, notebook: NotebookId, topic: &str) -> Result<Diagram> {
+        self.metrics.span("diagram").run(|span| {
+            let passages = self
+                .retriever
+                .retrieve(notebook, topic, PASSAGES_PER_DIAGRAM)?;
+            let drawn = diagram::diagram(self.llm.as_ref(), &passages, topic)?;
+            span.set("nodes", drawn.nodes.len() as i64);
+            let payload = AnswerPayload {
+                citations: Vec::new(),
+                rejected_quotes: drawn.rejected_quotes,
+                mind_map: None,
+                diagram: Some(drawn.clone()),
+            };
+            self.keep(
+                notebook,
+                "diagram",
+                &format!("Схема: {topic}"),
+                &drawn.title,
+                payload,
+            )?;
+            Ok(drawn)
+        })
     }
 
     /// A mind map of one source (or of the whole notebook), kept in the dialog.
@@ -359,6 +392,7 @@ impl Notebooks {
                     citations: Vec::new(),
                     rejected_quotes: map.rejected_quotes,
                     mind_map: Some(map.clone()),
+                    diagram: None,
                 };
                 self.keep(notebook, "mindmap", &asked, &map.root.title, payload)?;
                 Ok(map)
@@ -381,6 +415,7 @@ impl Notebooks {
                     citations: payload.citations,
                     rejected_quotes: payload.rejected_quotes,
                     mind_map: payload.mind_map,
+                    diagram: payload.diagram,
                 }
             })
             .collect())
@@ -809,6 +844,47 @@ mod tests {
         notebooks.ask(nb, "Какой срок?").ok();
         let last = prompts.lock().unwrap().last().unwrap().clone();
         assert!(!last.contains("История диалога"), "{last}");
+    }
+
+    #[test]
+    fn a_diagram_of_a_topic_is_drawn_from_found_passages_and_kept_in_the_dialog() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let llm = Recording {
+            reply: r#"{"title":"Срок","nodes":[{"id":"a","label":"Подписание"},{"id":"b","label":"Два года","n":1,"quote":"два года"}],"edges":[{"from":"a","to":"b"}]}"#,
+            prompts: prompts.clone(),
+        };
+        let notebooks = Notebooks::standard(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(llm),
+        );
+        let nb = notebooks.notebook("Диплом").unwrap();
+        notebooks
+            .add_source(
+                nb,
+                "договор.txt",
+                "Срок действия договора составляет два года.",
+            )
+            .unwrap();
+        notebooks
+            .add_source(nb, "заметки.txt", "Купить молоко и хлеб.")
+            .unwrap();
+
+        let drawn = notebooks.diagram(nb, "срок договора").unwrap();
+
+        assert_eq!(drawn.nodes.len(), 2);
+        assert_eq!(
+            drawn.nodes[1].cite.as_ref().unwrap().source_title,
+            "договор.txt"
+        );
+        assert!(prompts.lock().unwrap()[0].contains("Тема схемы: срок договора"));
+        let history = notebooks.history(nb).unwrap();
+        assert_eq!(history[0].text, "Схема: срок договора");
+        assert_eq!(history[1].kind, "diagram");
+        assert_eq!(history[1].diagram.as_ref().unwrap().edges.len(), 1);
+
+        let empty = notebooks.notebook("Пустой").unwrap();
+        assert!(notebooks.diagram(empty, "что угодно").is_err());
     }
 
     /// Plan first, then the answer; remembers the prompts.

@@ -3,6 +3,7 @@
 
 use notebook_rs::answer::{Answer, Citation};
 use notebook_rs::chatgpt::ModelEntry;
+use notebook_rs::diagram::Diagram;
 use notebook_rs::error::Error;
 use notebook_rs::metrics::Summary;
 use notebook_rs::mindmap::{MindMap, Node};
@@ -91,6 +92,58 @@ pub struct HistoryEntryDto {
     pub citations: Vec<CitationDto>,
     pub rejected_quotes: usize,
     pub mind_map: Option<MindMapDto>,
+    pub diagram: Option<DiagramDto>,
+}
+
+/// A diagram: boxes and arrows, some boxes tied to a checked place in a source.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagramDto {
+    pub title: String,
+    pub nodes: Vec<DiagramNodeDto>,
+    pub edges: Vec<EdgeDto>,
+    pub rejected_quotes: usize,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct DiagramNodeDto {
+    pub id: String,
+    pub label: String,
+    pub cite: Option<CitationDto>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct EdgeDto {
+    pub from: String,
+    pub to: String,
+    pub label: Option<String>,
+}
+
+impl From<Diagram> for DiagramDto {
+    fn from(diagram: Diagram) -> Self {
+        Self {
+            title: diagram.title,
+            nodes: diagram
+                .nodes
+                .into_iter()
+                .map(|n| DiagramNodeDto {
+                    id: n.id,
+                    label: n.label,
+                    cite: n.cite.map(Into::into),
+                })
+                .collect(),
+            edges: diagram
+                .edges
+                .into_iter()
+                .map(|e| EdgeDto {
+                    from: e.from,
+                    to: e.to,
+                    label: e.label,
+                })
+                .collect(),
+            rejected_quotes: diagram.rejected_quotes,
+        }
+    }
 }
 
 /// A mind map: a tree of titles, some of them tied to a checked place in a source.
@@ -139,6 +192,7 @@ impl From<HistoryEntry> for HistoryEntryDto {
             citations: entry.citations.into_iter().map(Into::into).collect(),
             rejected_quotes: entry.rejected_quotes,
             mind_map: entry.mind_map.map(Into::into),
+            diagram: entry.diagram.map(Into::into),
         }
     }
 }

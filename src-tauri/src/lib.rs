@@ -5,8 +5,8 @@
 mod dto;
 
 use dto::{
-    AccountDto, AddedDto, AnswerDto, HistoryEntryDto, MindMapDto, ModelStateDto, NotebookDto,
-    PassageViewDto, SourceDto, StatusDto, SummaryDto, user_message,
+    AccountDto, AddedDto, AnswerDto, DiagramDto, HistoryEntryDto, MindMapDto, ModelStateDto,
+    NotebookDto, PassageViewDto, SourceDto, StatusDto, SummaryDto, user_message,
 };
 use notebook_rs::chatgpt::{ChatGptAccount, open_in_browser};
 use notebook_rs::domain::NotebookId;
@@ -377,6 +377,20 @@ async fn mind_map(
 }
 
 #[tauri::command]
+async fn diagram(
+    engine: State<'_, Engine>,
+    notebook_id: i64,
+    topic: String,
+) -> Result<DiagramDto, String> {
+    let notebooks = engine.get()?;
+    let topic = clean_name(&topic).map_err(|_| "Напишите, о чём нарисовать схему.".to_string())?;
+    blocking(&engine, Some("command.diagram"), None, move || {
+        Ok(notebooks.diagram(NotebookId(notebook_id), &topic)?.into())
+    })
+    .await
+}
+
+#[tauri::command]
 async fn compare(
     engine: State<'_, Engine>,
     notebook_id: i64,
@@ -524,6 +538,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         summarize,
         compare,
         mind_map,
+        diagram,
         source_view,
         metrics_summary,
         account_status,
