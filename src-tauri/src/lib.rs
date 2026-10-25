@@ -5,8 +5,8 @@
 mod dto;
 
 use dto::{
-    AccountDto, AddedDto, AnswerDto, HistoryEntryDto, ModelStateDto, NotebookDto, PassageViewDto,
-    SourceDto, StatusDto, SummaryDto, user_message,
+    AccountDto, AddedDto, AnswerDto, HistoryEntryDto, MindMapDto, ModelStateDto, NotebookDto,
+    PassageViewDto, SourceDto, StatusDto, SummaryDto, user_message,
 };
 use notebook_rs::chatgpt::{ChatGptAccount, open_in_browser};
 use notebook_rs::domain::NotebookId;
@@ -357,6 +357,26 @@ async fn summarize(
 }
 
 #[tauri::command]
+async fn mind_map(
+    engine: State<'_, Engine>,
+    notebook_id: i64,
+    source: Option<String>,
+) -> Result<MindMapDto, String> {
+    let notebooks = engine.get()?;
+    blocking(
+        &engine,
+        Some("command.mindmap"),
+        source.clone(),
+        move || {
+            Ok(notebooks
+                .mind_map(NotebookId(notebook_id), source.as_deref())?
+                .into())
+        },
+    )
+    .await
+}
+
+#[tauri::command]
 async fn compare(
     engine: State<'_, Engine>,
     notebook_id: i64,
@@ -503,6 +523,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         clear_history,
         summarize,
         compare,
+        mind_map,
         source_view,
         metrics_summary,
         account_status,
@@ -930,6 +951,57 @@ mod ipc_tests {
             call(&window, "account_status", json!({})).unwrap(),
             json!({"signedIn": true, "provider": "chatgpt"})
         );
+    }
+
+    struct Tree;
+    impl Llm for Tree {
+        fn complete(&self, _prompt: &str) -> NotebookResult<String> {
+            Ok(
+                r#"{"title":"Договор","children":[{"title":"Срок","n":1,"quote":"два года"}]}"#
+                    .into(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_mind_map_comes_to_the_page_with_its_checked_places_and_stays_in_the_dialog() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::with_telemetry(Telemetry::open(&directory.path().join("metrics.db")));
+        let notebooks = Notebooks::standard_with_metrics(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(Tree),
+            engine.telemetry.metrics.clone(),
+        );
+        engine.slot.set(Ok(Arc::new(notebooks))).ok();
+        let window = window(engine);
+        let id = call(&window, "create_notebook", json!({"name": "n"})).unwrap()["id"].clone();
+        let file = directory.path().join("договор.txt");
+        std::fs::write(&file, "Срок действия договора составляет два года.").unwrap();
+        call(
+            &window,
+            "add_source",
+            json!({"notebookId": id, "location": file.to_str().unwrap()}),
+        )
+        .unwrap();
+
+        let map = call(
+            &window,
+            "mind_map",
+            json!({"notebookId": id, "source": null}),
+        )
+        .unwrap();
+
+        assert_eq!(map["root"]["title"], "Договор");
+        assert_eq!(map["root"]["children"][0]["title"], "Срок");
+        assert_eq!(
+            map["root"]["children"][0]["cite"]["sourceTitle"],
+            "договор.txt"
+        );
+        assert_eq!(map["nodes"], 2);
+        let history = call(&window, "history", json!({"notebookId": id})).unwrap();
+        assert_eq!(history[1]["kind"], "mindmap");
+        assert_eq!(history[1]["mindMap"]["root"]["title"], "Договор");
     }
 
     #[test]

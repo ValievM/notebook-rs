@@ -11,6 +11,7 @@ use crate::embed::Embedder;
 use crate::error::{Error, Result};
 use crate::llm::Llm;
 use crate::metrics::{InstrumentedEmbedder, InstrumentedLlm, InstrumentedRetriever, Metrics};
+use crate::mindmap::{self, MindMap};
 use crate::retrieve::{Bm25Retriever, HybridRetriever, Retriever, VectorRetriever};
 use crate::source::{Sources, folder};
 use crate::store::{NewPassage, NotebookInfo, SourceInfo, Store};
@@ -37,6 +38,8 @@ pub struct HistoryEntry {
     pub text: String,
     pub citations: Vec<Citation>,
     pub rejected_quotes: usize,
+    /// The map, for an answer of kind `mindmap`.
+    pub mind_map: Option<MindMap>,
 }
 
 /// What adding a location (a file, a page or a folder) did.
@@ -64,6 +67,8 @@ pub struct ReindexReport {
 struct AnswerPayload {
     citations: Vec<Citation>,
     rejected_quotes: usize,
+    #[serde(default)]
+    mind_map: Option<MindMap>,
 }
 
 /// How many passages go to the embedding model in one call. A bound on what is held and
@@ -304,16 +309,60 @@ impl Notebooks {
         question: &str,
         answer: &Answer,
     ) -> Result<()> {
-        let payload = serde_json::to_string(&AnswerPayload {
+        let payload = AnswerPayload {
             citations: answer.citations.clone(),
             rejected_quotes: answer.rejected_quotes,
-        })
-        .unwrap_or_default();
+            mind_map: None,
+        };
+        self.keep(notebook, kind, question, &answer.text, payload)
+    }
+
+    fn keep(
+        &self,
+        notebook: NotebookId,
+        kind: &str,
+        question: &str,
+        reply: &str,
+        payload: AnswerPayload,
+    ) -> Result<()> {
+        let payload = serde_json::to_string(&payload).unwrap_or_default();
         self.store
             .add_message(notebook, "user", kind, question, "")?;
         self.store
-            .add_message(notebook, "assistant", kind, &answer.text, &payload)?;
+            .add_message(notebook, "assistant", kind, reply, &payload)?;
         Ok(())
+    }
+
+    /// A mind map of one source (or of the whole notebook), kept in the dialog.
+    pub fn mind_map(&self, notebook: NotebookId, source: Option<&str>) -> Result<MindMap> {
+        self.metrics
+            .span("mindmap")
+            .subject(source.unwrap_or("*"))
+            .run(|span| {
+                let passages = self.passages_of(notebook, source)?;
+                let title = match source {
+                    Some(title) => title.to_string(),
+                    None => self
+                        .store
+                        .list_notebooks()?
+                        .into_iter()
+                        .find(|info| info.id == notebook)
+                        .map_or_else(|| "Блокнот".to_string(), |info| info.name),
+                };
+                let map = mindmap::mind_map(self.llm.as_ref(), &passages, &title, &self.budget)?;
+                span.set("nodes", map.nodes as i64);
+                let asked = match source {
+                    Some(title) => format!("Ментальная карта «{title}»"),
+                    None => "Ментальная карта блокнота".to_string(),
+                };
+                let payload = AnswerPayload {
+                    citations: Vec::new(),
+                    rejected_quotes: map.rejected_quotes,
+                    mind_map: Some(map.clone()),
+                };
+                self.keep(notebook, "mindmap", &asked, &map.root.title, payload)?;
+                Ok(map)
+            })
     }
 
     /// The dialog of the notebook, oldest first.
@@ -331,6 +380,7 @@ impl Notebooks {
                     text: m.text,
                     citations: payload.citations,
                     rejected_quotes: payload.rejected_quotes,
+                    mind_map: payload.mind_map,
                 }
             })
             .collect())
@@ -715,6 +765,48 @@ mod tests {
             kinds,
             ["summarize", "summarize", "compare", "compare", "ask", "ask"]
         );
+        let last = prompts.lock().unwrap().last().unwrap().clone();
+        assert!(!last.contains("История диалога"), "{last}");
+    }
+
+    #[test]
+    fn a_mind_map_of_the_notebook_is_built_and_kept_in_the_dialog_but_not_in_later_questions() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let llm = Recording {
+            reply: r#"{"title":"","children":[{"title":"Срок","n":1,"quote":"два года"}]}"#,
+            prompts: prompts.clone(),
+        };
+        let notebooks = Notebooks::standard(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(llm),
+        );
+        let nb = notebooks.notebook("Диплом").unwrap();
+        notebooks
+            .add_source(
+                nb,
+                "договор.txt",
+                "Срок действия договора составляет два года.",
+            )
+            .unwrap();
+
+        let map = notebooks.mind_map(nb, None).unwrap();
+
+        assert_eq!(
+            map.root.title, "Диплом",
+            "the root is named after the notebook"
+        );
+        assert_eq!(
+            map.root.children[0].cite.as_ref().unwrap().source_title,
+            "договор.txt"
+        );
+        let history = notebooks.history(nb).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].kind, "mindmap");
+        assert_eq!(history[1].mind_map.as_ref().unwrap().nodes, 2);
+        assert_eq!(history[0].text, "Ментальная карта блокнота");
+
+        notebooks.ask(nb, "Какой срок?").ok();
         let last = prompts.lock().unwrap().last().unwrap().clone();
         assert!(!last.contains("История диалога"), "{last}");
     }

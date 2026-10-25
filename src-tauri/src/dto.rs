@@ -5,6 +5,7 @@ use notebook_rs::answer::{Answer, Citation};
 use notebook_rs::chatgpt::ModelEntry;
 use notebook_rs::error::Error;
 use notebook_rs::metrics::Summary;
+use notebook_rs::mindmap::{MindMap, Node};
 use notebook_rs::service::{AddReport, HistoryEntry};
 use notebook_rs::settings::{EFFORTS, Settings};
 use notebook_rs::store::{NotebookInfo, SourceInfo};
@@ -89,6 +90,43 @@ pub struct HistoryEntryDto {
     pub text: String,
     pub citations: Vec<CitationDto>,
     pub rejected_quotes: usize,
+    pub mind_map: Option<MindMapDto>,
+}
+
+/// A mind map: a tree of titles, some of them tied to a checked place in a source.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MindMapDto {
+    pub root: NodeDto,
+    pub rejected_quotes: usize,
+    pub nodes: usize,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct NodeDto {
+    pub title: String,
+    pub cite: Option<CitationDto>,
+    pub children: Vec<NodeDto>,
+}
+
+impl From<Node> for NodeDto {
+    fn from(node: Node) -> Self {
+        Self {
+            title: node.title,
+            cite: node.cite.map(Into::into),
+            children: node.children.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<MindMap> for MindMapDto {
+    fn from(map: MindMap) -> Self {
+        Self {
+            root: map.root.into(),
+            rejected_quotes: map.rejected_quotes,
+            nodes: map.nodes,
+        }
+    }
 }
 
 impl From<HistoryEntry> for HistoryEntryDto {
@@ -100,6 +138,7 @@ impl From<HistoryEntry> for HistoryEntryDto {
             text: entry.text,
             citations: entry.citations.into_iter().map(Into::into).collect(),
             rejected_quotes: entry.rejected_quotes,
+            mind_map: entry.mind_map.map(Into::into),
         }
     }
 }
