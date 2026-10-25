@@ -407,7 +407,7 @@ async function openSource(title, ordinal = null, quote = null) {
 function closeViewer() { $('viewer').hidden = true; }
 $('viewer-close').addEventListener('click', closeViewer);
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') { closeViewer(); closeMetrics(); }
+  if (event.key === 'Escape') { closeViewer(); closeMetrics(); closeSettings(); }
 });
 
 // ---------- who answers ----------
@@ -419,7 +419,9 @@ async function refreshAccount() {
     $('account-line').textContent = account.signedIn
       ? 'Отвечает ChatGPT по вашей подписке'
       : 'Отвечает Codex. Вход через ChatGPT даст свою модель и лимиты.';
-    $('account-button').textContent = account.signedIn ? 'Выйти из ChatGPT' : 'Войти через ChatGPT';
+    $('sign-in-button').hidden = account.signedIn;
+    $('sign-out-group').hidden = !account.signedIn;
+    hideSignOutConfirm();
   } catch (error) {
     $('account-line').textContent = String(error);
   }
@@ -467,18 +469,38 @@ $('effort-select').addEventListener('change', (event) => {
   if (event.target.value) choose({ effort: event.target.value });
 });
 
-$('account-button').addEventListener('click', async () => {
-  const button = $('account-button');
+function hideSignOutConfirm() {
+  $('sign-out-confirm').hidden = true;
+  $('sign-out-button').hidden = false;
+}
+
+// Signing out takes two steps: the button only asks, and "Да, выйти" does it.
+$('sign-out-button').addEventListener('click', () => {
+  $('sign-out-button').hidden = true;
+  $('sign-out-confirm').hidden = false;
+  $('sign-out-no').focus();
+});
+$('sign-out-no').addEventListener('click', hideSignOutConfirm);
+$('sign-out-yes').addEventListener('click', async () => {
+  $('sign-out-yes').disabled = true;
+  try {
+    await api.invoke('account_sign_out');
+    toast('Вход удалён: отвечает Codex.');
+  } catch (error) {
+    toast(String(error), 'error');
+  } finally {
+    $('sign-out-yes').disabled = false;
+    await refreshAccount();
+  }
+});
+
+$('sign-in-button').addEventListener('click', async () => {
+  const button = $('sign-in-button');
   button.disabled = true;
   try {
-    if (state.account?.signedIn) {
-      await api.invoke('account_sign_out');
-      toast('Вход удалён: отвечает Codex.');
-    } else {
-      $('account-line').textContent = 'Жду подтверждения в браузере: войдите и разрешите использовать план ChatGPT (до 5 минут)…';
-      await api.invoke('account_sign_in');
-      toast('Вход выполнен: отвечает ChatGPT.');
-    }
+    $('account-line').textContent = 'Жду подтверждения в браузере: войдите и разрешите использовать план ChatGPT (до 5 минут)…';
+    await api.invoke('account_sign_in');
+    toast('Вход выполнен: отвечает ChatGPT.');
   } catch (error) {
     toast(String(error), 'error');
   } finally {
@@ -486,6 +508,20 @@ $('account-button').addEventListener('click', async () => {
     await refreshAccount();
   }
 });
+
+// ---------- settings ----------
+
+function closeSettings() { $('settings').hidden = true; hideSignOutConfirm(); }
+
+async function openSettings() {
+  closeViewer();
+  closeMetrics();
+  $('settings').hidden = false;
+  await refreshAccount();
+}
+
+$('open-settings').addEventListener('click', openSettings);
+$('settings-close').addEventListener('click', closeSettings);
 
 // ---------- metrics ----------
 
@@ -583,6 +619,7 @@ async function refreshMetrics() {
 
 async function openMetrics() {
   closeViewer();
+  closeSettings();
   $('metrics').hidden = false;
   await refreshMetrics();
 }

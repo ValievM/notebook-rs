@@ -17,16 +17,7 @@
         <input id="new-notebook-name" type="text" placeholder="Новый блокнот" aria-label="Название нового блокнота" autocomplete="off">
         <button type="submit" class="icon" aria-label="Создать блокнот">+</button>
       </form>
-      <section class="account" aria-label="Кто отвечает">
-        <p id="account-line" class="hint" role="status"></p>
-        <div id="model-choice" class="model-choice" hidden>
-          <label for="model-select">Модель</label>
-          <select id="model-select"></select>
-          <label for="effort-select">Размышление</label>
-          <select id="effort-select"></select>
-        </div>
-        <button id="account-button" type="button">Войти через ChatGPT</button>
-      </section>
+      <button id="open-settings" type="button" class="quiet">Настройки</button>
       <button id="open-metrics" type="button" class="quiet">Метрики</button>
     </aside>
 
@@ -69,6 +60,37 @@
       <div id="viewer-body" class="viewer-body"></div>
     </aside>
   </div>
+
+  <aside id="settings" class="viewer" hidden aria-label="Настройки">
+    <header>
+      <h2>Настройки</h2>
+      <button id="settings-close" type="button" class="icon" aria-label="Закрыть настройки">×</button>
+    </header>
+    <div class="viewer-body settings-body">
+      <section class="settings-group" aria-label="Кто отвечает">
+        <h3>Кто отвечает</h3>
+        <p id="account-line" class="hint" role="status"></p>
+        <div id="model-choice" class="model-choice" hidden>
+          <label for="model-select">Модель</label>
+          <select id="model-select"></select>
+          <label for="effort-select">Размышление</label>
+          <select id="effort-select"></select>
+        </div>
+        <button id="sign-in-button" type="button" hidden>Войти через ChatGPT</button>
+      </section>
+      <section id="sign-out-group" class="settings-group" aria-label="Аккаунт" hidden>
+        <h3>Аккаунт</h3>
+        <button id="sign-out-button" type="button" class="quiet danger">Выйти из ChatGPT…</button>
+        <div id="sign-out-confirm" class="confirm" role="alertdialog" aria-label="Подтверждение выхода" hidden>
+          <p>Выйти из ChatGPT? Отвечать будет Codex, а чтобы вернуться, нужно снова войти.</p>
+          <div class="confirm-buttons">
+            <button id="sign-out-yes" type="button" class="danger">Да, выйти</button>
+            <button id="sign-out-no" type="button">Отмена</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </aside>
 
   <aside id="metrics" class="viewer wide" hidden aria-label="Метрики">
     <header>
