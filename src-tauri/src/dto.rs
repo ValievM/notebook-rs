@@ -2,6 +2,7 @@
 //! messages in Russian. No logic of the notebook lives here.
 
 use notebook_rs::answer::{Answer, Citation};
+use notebook_rs::cards::Deck;
 use notebook_rs::chatgpt::ModelEntry;
 use notebook_rs::diagram::Diagram;
 use notebook_rs::error::Error;
@@ -93,6 +94,41 @@ pub struct HistoryEntryDto {
     pub rejected_quotes: usize,
     pub mind_map: Option<MindMapDto>,
     pub diagram: Option<DiagramDto>,
+    pub deck: Option<DeckDto>,
+}
+
+/// Flashcards: every card carries the checked place that proves its answer.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckDto {
+    pub title: String,
+    pub cards: Vec<CardDto>,
+    pub dropped: usize,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct CardDto {
+    pub question: String,
+    pub answer: String,
+    pub cite: CitationDto,
+}
+
+impl From<Deck> for DeckDto {
+    fn from(deck: Deck) -> Self {
+        Self {
+            title: deck.title,
+            cards: deck
+                .cards
+                .into_iter()
+                .map(|c| CardDto {
+                    question: c.question,
+                    answer: c.answer,
+                    cite: c.cite.into(),
+                })
+                .collect(),
+            dropped: deck.dropped,
+        }
+    }
 }
 
 /// A diagram: boxes and arrows, some boxes tied to a checked place in a source.
@@ -193,6 +229,7 @@ impl From<HistoryEntry> for HistoryEntryDto {
             rejected_quotes: entry.rejected_quotes,
             mind_map: entry.mind_map.map(Into::into),
             diagram: entry.diagram.map(Into::into),
+            deck: entry.deck.map(Into::into),
         }
     }
 }

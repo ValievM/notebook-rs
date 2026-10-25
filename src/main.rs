@@ -88,6 +88,12 @@ enum Command {
         #[arg(long)]
         source: Option<String>,
     },
+    /// Flashcards of one source (`--source <title>`) or of the whole notebook, as text
+    Cards {
+        notebook: String,
+        #[arg(long)]
+        source: Option<String>,
+    },
     /// A study plan of one source (`--source <title>`) or of the whole notebook
     Plan {
         notebook: String,
@@ -234,6 +240,26 @@ fn main() -> Result<()> {
                 println!(
                     "\n(цитат узлов, которых нет в источниках, отброшено: {})",
                     map.rejected_quotes
+                );
+            }
+        }
+        Command::Cards { notebook, source } => {
+            let id = notebooks.notebook(&notebook)?;
+            let deck = notebooks.flashcards(id, source.as_deref())?;
+            for (i, card) in deck.cards.iter().enumerate() {
+                println!(
+                    "{}. В: {}\n   О: {}\n   [{}] {}",
+                    i + 1,
+                    card.question,
+                    card.answer,
+                    card.cite.n,
+                    card.cite.source_title
+                );
+            }
+            if deck.dropped > 0 {
+                println!(
+                    "\n(карточек без подтверждённой цитаты отброшено: {})",
+                    deck.dropped
                 );
             }
         }

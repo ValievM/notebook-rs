@@ -5,8 +5,8 @@
 mod dto;
 
 use dto::{
-    AccountDto, AddedDto, AnswerDto, DiagramDto, HistoryEntryDto, MindMapDto, ModelStateDto,
-    NotebookDto, PassageViewDto, SourceDto, StatusDto, SummaryDto, user_message,
+    AccountDto, AddedDto, AnswerDto, DeckDto, DiagramDto, HistoryEntryDto, MindMapDto,
+    ModelStateDto, NotebookDto, PassageViewDto, SourceDto, StatusDto, SummaryDto, user_message,
 };
 use notebook_rs::chatgpt::{ChatGptAccount, open_in_browser};
 use notebook_rs::domain::NotebookId;
@@ -357,6 +357,21 @@ async fn summarize(
 }
 
 #[tauri::command]
+async fn flashcards(
+    engine: State<'_, Engine>,
+    notebook_id: i64,
+    source: Option<String>,
+) -> Result<DeckDto, String> {
+    let notebooks = engine.get()?;
+    blocking(&engine, Some("command.cards"), source.clone(), move || {
+        Ok(notebooks
+            .flashcards(NotebookId(notebook_id), source.as_deref())?
+            .into())
+    })
+    .await
+}
+
+#[tauri::command]
 async fn study_plan(
     engine: State<'_, Engine>,
     notebook_id: i64,
@@ -554,6 +569,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         compare,
         mind_map,
         study_plan,
+        flashcards,
         diagram,
         source_view,
         metrics_summary,
@@ -1080,6 +1096,68 @@ mod ipc_tests {
 
         let error = call(&window, "diagram", json!({"notebookId": id, "topic": "  "})).unwrap_err();
         assert!(error.as_str().unwrap().contains("Напишите"), "{error}");
+    }
+
+    struct CardsAndPlan;
+    impl Llm for CardsAndPlan {
+        fn complete(&self, prompt: &str) -> NotebookResult<String> {
+            Ok(if prompt.contains("карточки для повторения") {
+                r#"{"cards":[{"question":"Какой срок?","answer":"Два года","n":1,"quote":"два года"},{"question":"Выдумка?","answer":"да","n":1,"quote":"нет такого"}]}"#
+            } else {
+                r#"{"answer":"1. Срок договора [1].","citations":[{"n":1,"quote":"два года"}]}"#
+            }
+            .into())
+        }
+    }
+
+    #[test]
+    fn flashcards_and_a_study_plan_come_to_the_page_and_stay_in_the_dialog() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::with_telemetry(Telemetry::open(&directory.path().join("metrics.db")));
+        let notebooks = Notebooks::standard_with_metrics(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(CardsAndPlan),
+            engine.telemetry.metrics.clone(),
+        );
+        engine.slot.set(Ok(Arc::new(notebooks))).ok();
+        let window = window(engine);
+        let id = call(&window, "create_notebook", json!({"name": "n"})).unwrap()["id"].clone();
+        let file = directory.path().join("договор.txt");
+        std::fs::write(&file, "Срок действия договора составляет два года.").unwrap();
+        call(
+            &window,
+            "add_source",
+            json!({"notebookId": id, "location": file.to_str().unwrap()}),
+        )
+        .unwrap();
+
+        let deck = call(
+            &window,
+            "flashcards",
+            json!({"notebookId": id, "source": null}),
+        )
+        .unwrap();
+        let plan = call(
+            &window,
+            "study_plan",
+            json!({"notebookId": id, "source": null}),
+        )
+        .unwrap();
+
+        assert_eq!(deck["cards"].as_array().unwrap().len(), 1);
+        assert_eq!(deck["cards"][0]["cite"]["sourceTitle"], "договор.txt");
+        assert_eq!(deck["dropped"], 1);
+        assert_eq!(plan["text"], "1. Срок договора [1].");
+        let history = call(&window, "history", json!({"notebookId": id})).unwrap();
+        let kinds: Vec<&str> = history
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["cards", "cards", "plan", "plan"]);
+        assert_eq!(history[1]["deck"]["title"], "n");
     }
 
     #[test]

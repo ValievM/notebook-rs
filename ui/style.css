@@ -275,6 +275,13 @@ body { display: flex; flex-direction: column; }
 .map-note { padding: 6px 16px 0; margin: 0; }
 .map-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
+/* Flashcards */
+.deck-card { border: 1px solid var(--line); border-radius: 16px; padding: 20px; display: grid; gap: 10px; background: var(--bg); max-width: 640px; margin: 12px auto; }
+.deck-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.deck-text { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
+.deck-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+.deck-card h3 { margin: 0; }
+
 /* Source viewer */
 .viewer {
   position: fixed;

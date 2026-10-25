@@ -96,6 +96,18 @@ export const api = {
       }
       case 'history': return structuredClone(data.history[args.notebookId] ?? []);
       case 'clear_history': data.history[args.notebookId] = []; return null;
+      case 'flashcards': {
+        const cite = (n, quote) => ({ n, sourceTitle: 'договор.md', ordinal: n - 1, quote });
+        const deck = { title: args.source ?? 'Аренда', dropped: 1, cards: [
+          { question: 'Каков срок действия договора?', answer: 'Два года с даты подписания.', cite: cite(1, 'Срок действия договора составляет два года') },
+          { question: 'Когда вносится арендная плата?', answer: 'Ежемесячно до десятого числа.', cite: cite(2, 'вносится ежемесячно до десятого числа') },
+          { question: 'За сколько предупредить о выезде?', answer: 'За тридцать дней.', cite: cite(1, 'освободить помещение за тридцать дней') },
+        ] };
+        const list = (data.history[args.notebookId] ??= []);
+        list.push({ id: list.length + 1, user: true, kind: 'cards', text: 'Карточки блокнота', citations: [], rejectedQuotes: 0 });
+        list.push({ id: list.length + 1, user: false, kind: 'cards', text: deck.title, citations: [], rejectedQuotes: 0, deck });
+        return deck;
+      }
       case 'study_plan': return { ...structuredClone(answer), text: '1. Срок и продление договора [1]\n2. Порядок оплаты [2]\n3. Условия выезда [3]' };
       case 'mind_map': {
         const cite = (n, quote) => ({ n, sourceTitle: 'договор.md', ordinal: n - 1, quote });

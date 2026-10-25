@@ -5,6 +5,7 @@
 
 import { renderMindMap } from './mindmap.js';
 import { renderDiagram } from './diagram.js';
+import { renderDeck } from './deck.js';
 
 const api = await loadApi();
 
@@ -84,7 +85,7 @@ function banner(message, kind = 'info') {
 function working(delta) {
   state.working += delta;
   const busy = state.working > 0 || !state.ready;
-  for (const id of ['send', 'summarize', 'compare', 'mindmap', 'plan', 'diagram', 'diagram-go', 'pick-files', 'pick-folder']) $(id).disabled = busy;
+  for (const id of ['send', 'summarize', 'compare', 'mindmap', 'plan', 'cards', 'diagram', 'diagram-go', 'pick-files', 'pick-folder']) $(id).disabled = busy;
   if (!busy) renderSelection();
 }
 
@@ -139,6 +140,7 @@ async function loadHistory(id) {
         ? h('div', { class: 'message user' }, entry.text)
         : entry.mindMap ? mapCard(entry.mindMap)
         : entry.diagram ? diagramCard(entry.diagram)
+        : entry.deck ? deckCard(entry.deck)
         : answerMessage(ANSWER_KINDS[entry.kind] ?? 'Ответ', entry));
     }
   } catch (error) { toast(String(error), 'error'); }
@@ -262,6 +264,7 @@ function renderSelection() {
   $('compare').disabled = busy || count !== 2;
   $('mindmap').disabled = busy || !hasNotebook || count > 1;
   $('plan').disabled = busy || !hasNotebook || count > 1;
+  $('cards').disabled = busy || !hasNotebook || count > 1;
   $('diagram').disabled = busy || !hasNotebook;
   $('mindmap').textContent = count === 1 ? 'Карта источника' : 'Ментальная карта';
   $('selection-hint').textContent =
@@ -447,6 +450,35 @@ function openMap(map) {
 }
 
 function closeMap() { $('map-view').hidden = true; }
+
+// ---------- flashcards ----------
+
+function deckCard(deck) {
+  return h('div', { class: 'message assistant' },
+    h('div', { class: 'kind' }, 'Карточки'),
+    h('div', { class: 'map-card' },
+      h('span', {}, `${deck.title} · карточек: ${deck.cards.length}`),
+      h('button', { type: 'button', onclick: () => openDeck(deck) }, 'Повторять')));
+}
+
+function openDeck(deck) {
+  closeViewer();
+  closeMetrics();
+  closeSettings();
+  $('map-title').textContent = `Карточки: ${deck.title}`;
+  $('map-note').textContent = deck.dropped > 0
+    ? `Отброшено карточек без подтверждённой цитаты: ${deck.dropped}. У оставшихся ответ можно проверить по источнику.`
+    : 'У каждой карточки ответ можно проверить по источнику.';
+  $('map-view').hidden = false;
+  renderDeck($('map-body'), deck, { onCite: (citation) => { closeMap(); openCitation(citation); } });
+}
+
+$('cards').addEventListener('click', async () => {
+  const [source] = [...state.selected];
+  addMessage(h('div', { class: 'message user' }, source ? `Карточки «${source}»` : 'Карточки блокнота'));
+  await runTask('Карточки', 'Делаю карточки…', 'flashcards', { source: source ?? null },
+    (deck) => { openDeck(deck); return deckCard(deck); });
+});
 
 // ---------- diagram ----------
 
@@ -732,6 +764,8 @@ const KIND_LABELS = {
   summarize: 'конспект',
   compare: 'сравнение',
   mindmap: 'ментальная карта',
+  cards: 'карточки',
+  'command.cards': 'окно: карточки',
   plan: 'план изучения',
   'command.plan': 'окно: план изучения',
   diagram: 'схема',

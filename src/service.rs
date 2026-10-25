@@ -2,6 +2,7 @@
 //! split and embedded on the way in, and how a question is searched and answered on the way out.
 
 use crate::answer::{self, Answer, Citation, Turn};
+use crate::cards::{self, Deck};
 use crate::chunk::Chunker;
 use crate::chunk_markdown::MarkdownChunker;
 use crate::deep;
@@ -44,6 +45,8 @@ pub struct HistoryEntry {
     pub mind_map: Option<MindMap>,
     /// The diagram, for an answer of kind `diagram`.
     pub diagram: Option<Diagram>,
+    /// The cards, for an answer of kind `cards`.
+    pub deck: Option<Deck>,
 }
 
 /// What adding a location (a file, a page or a folder) did.
@@ -75,6 +78,8 @@ struct AnswerPayload {
     mind_map: Option<MindMap>,
     #[serde(default)]
     diagram: Option<Diagram>,
+    #[serde(default)]
+    deck: Option<Deck>,
 }
 
 /// How many passages go to the embedding model in one call. A bound on what is held and
@@ -320,6 +325,7 @@ impl Notebooks {
             rejected_quotes: answer.rejected_quotes,
             mind_map: None,
             diagram: None,
+            deck: None,
         };
         self.keep(notebook, kind, question, &answer.text, payload)
     }
@@ -354,6 +360,7 @@ impl Notebooks {
                 rejected_quotes: drawn.rejected_quotes,
                 mind_map: None,
                 diagram: Some(drawn.clone()),
+                deck: None,
             };
             self.keep(
                 notebook,
@@ -366,6 +373,45 @@ impl Notebooks {
         })
     }
 
+    /// The name of what a picture or a deck is made of: the source, or the notebook.
+    fn material_title(&self, notebook: NotebookId, source: Option<&str>) -> Result<String> {
+        Ok(match source {
+            Some(title) => title.to_string(),
+            None => self
+                .store
+                .list_notebooks()?
+                .into_iter()
+                .find(|info| info.id == notebook)
+                .map_or_else(|| "Блокнот".to_string(), |info| info.name),
+        })
+    }
+
+    /// Flashcards of one source (or of the whole notebook), kept in the dialog.
+    pub fn flashcards(&self, notebook: NotebookId, source: Option<&str>) -> Result<Deck> {
+        self.metrics
+            .span("cards")
+            .subject(source.unwrap_or("*"))
+            .run(|span| {
+                let passages = self.passages_of(notebook, source)?;
+                let title = self.material_title(notebook, source)?;
+                let deck = cards::flashcards(self.llm.as_ref(), &passages, &title, &self.budget)?;
+                span.set("cards", deck.cards.len() as i64);
+                let asked = match source {
+                    Some(title) => format!("Карточки «{title}»"),
+                    None => "Карточки блокнота".to_string(),
+                };
+                let payload = AnswerPayload {
+                    citations: Vec::new(),
+                    rejected_quotes: deck.dropped,
+                    mind_map: None,
+                    diagram: None,
+                    deck: Some(deck.clone()),
+                };
+                self.keep(notebook, "cards", &asked, &deck.title, payload)?;
+                Ok(deck)
+            })
+    }
+
     /// A mind map of one source (or of the whole notebook), kept in the dialog.
     pub fn mind_map(&self, notebook: NotebookId, source: Option<&str>) -> Result<MindMap> {
         self.metrics
@@ -373,15 +419,7 @@ impl Notebooks {
             .subject(source.unwrap_or("*"))
             .run(|span| {
                 let passages = self.passages_of(notebook, source)?;
-                let title = match source {
-                    Some(title) => title.to_string(),
-                    None => self
-                        .store
-                        .list_notebooks()?
-                        .into_iter()
-                        .find(|info| info.id == notebook)
-                        .map_or_else(|| "Блокнот".to_string(), |info| info.name),
-                };
+                let title = self.material_title(notebook, source)?;
                 let map = mindmap::mind_map(self.llm.as_ref(), &passages, &title, &self.budget)?;
                 span.set("nodes", map.nodes as i64);
                 let asked = match source {
@@ -393,6 +431,7 @@ impl Notebooks {
                     rejected_quotes: map.rejected_quotes,
                     mind_map: Some(map.clone()),
                     diagram: None,
+                    deck: None,
                 };
                 self.keep(notebook, "mindmap", &asked, &map.root.title, payload)?;
                 Ok(map)
@@ -416,6 +455,7 @@ impl Notebooks {
                     rejected_quotes: payload.rejected_quotes,
                     mind_map: payload.mind_map,
                     diagram: payload.diagram,
+                    deck: payload.deck,
                 }
             })
             .collect())
@@ -924,6 +964,41 @@ mod tests {
                 .last()
                 .unwrap()
                 .contains("История диалога")
+        );
+    }
+
+    #[test]
+    fn flashcards_are_made_from_the_notebook_and_kept_in_the_dialog() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let llm = Recording {
+            reply: r#"{"cards":[{"question":"Какой срок?","answer":"Два года","n":1,"quote":"два года"},{"question":"Выдумка?","answer":"да","n":1,"quote":"нет такого"}]}"#,
+            prompts: prompts.clone(),
+        };
+        let notebooks = Notebooks::standard(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(llm),
+        );
+        let nb = notebooks.notebook("Диплом").unwrap();
+        notebooks
+            .add_source(
+                nb,
+                "договор.txt",
+                "Срок действия договора составляет два года.",
+            )
+            .unwrap();
+
+        let deck = notebooks.flashcards(nb, None).unwrap();
+
+        assert_eq!(deck.title, "Диплом");
+        assert_eq!(deck.cards.len(), 1);
+        assert_eq!(deck.dropped, 1);
+        let history = notebooks.history(nb).unwrap();
+        assert_eq!(history[0].text, "Карточки блокнота");
+        assert_eq!(history[1].kind, "cards");
+        assert_eq!(
+            history[1].deck.as_ref().unwrap().cards[0].answer,
+            "Два года"
         );
     }
 
