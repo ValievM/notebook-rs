@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use notebook_rs::{
     answer::Answer,
+    chatgpt::{ChatGptAccount, open_in_browser},
     digest::Budget,
     embed::{Embedder, HashingEmbedder},
     llm::CodexExec,
@@ -30,6 +31,13 @@ struct Cli {
     /// longer material is cut into parts that are summarized at the same time and merged.
     #[arg(long, global = true)]
     max_chars: Option<usize>,
+    /// The model to ask for when answering with the ChatGPT sign-in (default: the first model of
+    /// the account).
+    #[arg(long, global = true, env = "NOTEBOOK_RS_MODEL")]
+    model: Option<String>,
+    /// How much the model thinks with the ChatGPT sign-in: low, medium or high.
+    #[arg(long, global = true, env = "NOTEBOOK_RS_EFFORT")]
+    effort: Option<String>,
     /// Do not record durations and memory (they go to metrics.db next to the notebooks).
     #[arg(long, global = true)]
     no_metrics: bool,
@@ -94,6 +102,17 @@ enum Command {
         first: String,
         second: String,
     },
+    /// Sign in with your ChatGPT account, so that answers are paid by your subscription.
+    Login {
+        /// Print the address instead of opening the browser (open it yourself, on any device
+        /// that can reach this computer's port 1455 only if it is this one).
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Forget the sign-in on this computer (answers go back to Codex).
+    Logout,
+    /// Whether you are signed in, and who answers.
+    Account,
     /// How long things took, how often they failed, how much memory the program held.
     Stats {
         /// How far back to look.
@@ -115,8 +134,17 @@ fn main() -> Result<()> {
     };
     let metrics_path = path.with_file_name("metrics.db");
     let clock = SystemClock::default();
-    if let Command::Stats { hours } = cli.command {
-        return print_stats(&metrics_path, hours, clock.wall_ms());
+    let account = ChatGptAccount::open(path.with_file_name("chatgpt-auth.json"));
+    // These need neither the notebooks nor the embedding model.
+    match &cli.command {
+        Command::Stats { hours } => return print_stats(&metrics_path, *hours, clock.wall_ms()),
+        Command::Login { no_browser } => return sign_in(&account, *no_browser),
+        Command::Logout => return sign_out(&account),
+        Command::Account => {
+            print_account(&account, cli.model.as_deref());
+            return Ok(());
+        }
+        _ => {}
     }
     // Kept in this scope: dropping it at the end of `main` writes what is still waiting.
     let recorder = (!cli.no_metrics)
@@ -138,7 +166,11 @@ fn main() -> Result<()> {
     let mut notebooks = Notebooks::standard_with_metrics(
         Store::open(&path)?,
         embedder,
-        Box::new(CodexExec::default()),
+        Box::new(account.llm(
+            Box::new(CodexExec::default()),
+            cli.model.as_deref(),
+            cli.effort.as_deref(),
+        )),
         metrics.clone(),
     );
     if let Some(chars_per_call) = cli.max_chars {
@@ -184,7 +216,9 @@ fn main() -> Result<()> {
             let id = notebooks.notebook(&notebook)?;
             print_answer(&notebooks.compare(id, &first, &second)?);
         }
-        Command::Stats { .. } => unreachable!("handled before the notebooks are opened"),
+        Command::Stats { .. } | Command::Login { .. } | Command::Logout | Command::Account => {
+            unreachable!("handled before the notebooks are opened")
+        }
     }
     Ok(())
 }
@@ -218,4 +252,38 @@ fn print_stats(path: &std::path::Path, hours: u64, now_ms: i64) -> Result<()> {
         .with_context(|| format!("cannot read {}", path.display()))?;
     print!("{}", report::render(&summary, hours, now_ms));
     Ok(())
+}
+
+fn sign_in(account: &ChatGptAccount, no_browser: bool) -> Result<()> {
+    println!("Войдите в ChatGPT и разрешите использование плана ChatGPT.");
+    println!("Жду подтверждения (до 5 минут)…");
+    account.sign_in("notebook-rs", &|url| {
+        if no_browser {
+            println!("Откройте этот адрес в браузере:\n{url}");
+            return Ok(());
+        }
+        open_in_browser(url).inspect_err(|_| eprintln!("Откройте этот адрес в браузере: {url}"))
+    })?;
+    println!("Готово: вход выполнен. Теперь отвечает ChatGPT по вашей подписке.");
+    Ok(())
+}
+
+fn sign_out(account: &ChatGptAccount) -> Result<()> {
+    account.sign_out()?;
+    println!("Вход на этом компьютере удалён. Отвечает Codex.");
+    println!("Само подключение можно убрать и в настройках ChatGPT, в списке приложений.");
+    Ok(())
+}
+
+fn print_account(account: &ChatGptAccount, model: Option<&str>) {
+    if account.signed_in() {
+        println!("Вход через ChatGPT: выполнен.");
+        println!(
+            "Отвечает: ChatGPT, модель {}.",
+            model.unwrap_or("первая из списка вашего аккаунта")
+        );
+    } else {
+        println!("Вход через ChatGPT: не выполнен (выполните `nb login`).");
+        println!("Отвечает: Codex (команда `codex exec`).");
+    }
 }
