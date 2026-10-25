@@ -9,18 +9,22 @@
 //! This is a port of the sign-in that the owner's family-expense bot used before it was
 //! removed from that project (see DECISIONS D-16).
 
+mod auto;
 mod credentials;
 mod login;
 mod oauth;
+mod responses;
 mod store;
 mod token_source;
 
 #[cfg(test)]
 mod testing;
 
+pub use auto::AutoLlm;
 pub use credentials::Credentials;
 pub use login::{DEFAULT_PORT, LoginOptions, login, open_in_browser};
 pub use oauth::{OAuth, OAuthError, TokenError};
+pub use responses::ChatGptLlm;
 pub use store::{FileStore, Store};
 pub use token_source::TokenSource;
 
@@ -34,3 +38,5 @@ pub const AUTHORIZE_URL: &str = "https://auth.openai.com/api/accounts/authorize"
 pub const TOKEN_URL: &str = "https://auth.openai.com/api/accounts/oauth/token";
 /// A token is refreshed this long before it expires.
 pub const REFRESH_WINDOW_MS: i64 = 2 * 60 * 1000;
+/// The address of the API the token is for.
+pub const API_BASE: &str = "https://api.openai.com/v1";
