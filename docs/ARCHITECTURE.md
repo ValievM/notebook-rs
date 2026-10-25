@@ -22,6 +22,7 @@ chunk::Chunker     embed::Embedder          retrieve::Retriever ──► answer
 | `error` | Единый `Error` (thiserror). `anyhow` только в `main.rs`. |
 | `chunk` | Трейт `Chunker`, `ParagraphChunker`. Режет источник на фрагменты. |
 | `chunk_markdown` | `MarkdownChunker`: по заголовкам, путь заголовков в тексте фрагмента, перекрытие по предложениям. Стандартная нарезка. |
+| `source` | Трейт `Reader` (читает один вид источника), цепочка `Sources`; `WebReader`, `PdfReader`, `TextReader`. Выход читателя это недоверенный текст. |
 | `embed` | Трейт `Embedder` (`embed` для фрагментов, `embed_query` для вопроса), `HashingEmbedder` (офлайн), `cosine`. Вектор помечен именем модели. |
 | `embed_fast` | `FastEmbedder` (fastembed, E5), только с `--features fastembed`. |
 | `store` | Репозиторий над SQLite: FTS5 (BM25) и векторы (BLOB). Единственное место с SQL, миграции через `user_version`. |
@@ -36,6 +37,7 @@ chunk::Chunker     embed::Embedder          retrieve::Retriever ──► answer
 - **Порт и адаптер (hexagonal)**: `Llm`, `Embedder`, `Store` (репозиторий). Ядро не знает, что за ним `codex` или SQLite.
 - **Стратегия**: `Chunker`; позже Markdown/по токенам рядом с абзацным.
 - **Компоновщик (composite)**: `HybridRetriever` сам `Retriever` и состоит из `Retriever`-ов.
+- **Цепочка обязанностей**: `Sources` (читатели по очереди, первый подходящий читает).
 - **Фасад**: `Notebooks`.
 - **Newtype**: идентификаторы нельзя перепутать.
 - **Репозиторий**: `Store` прячет SQL; потокобезопасен (`Mutex<Connection>`) для будущего окна.

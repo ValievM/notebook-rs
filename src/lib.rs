@@ -11,4 +11,5 @@ pub mod llm;
 pub mod parallel;
 pub mod retrieve;
 pub mod service;
+pub mod source;
 pub mod store;

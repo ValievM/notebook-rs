@@ -8,6 +8,8 @@ pub enum Error {
     ModelUnavailable(String),
     #[error("the model reply cannot be used: {0}")]
     BadReply(String),
+    #[error("cannot read the source: {0}")]
+    Source(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

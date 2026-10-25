@@ -4,6 +4,7 @@ use notebook_rs::{
     embed::{Embedder, HashingEmbedder},
     llm::CodexExec,
     service::Notebooks,
+    source::Sources,
     store::Store,
 };
 use std::path::PathBuf;
@@ -58,8 +59,9 @@ fn embedder(kind: EmbedderKind, db_path: &std::path::Path) -> Result<Arc<dyn Emb
 
 #[derive(Subcommand)]
 enum Command {
-    /// Add a text or markdown file as a source (the same title replaces the old one).
-    Add { notebook: String, file: PathBuf },
+    /// Add a source: a text or Markdown file, a PDF file, or a web address (http/https).
+    /// The same title replaces the old source.
+    Add { notebook: String, location: String },
     /// Ask a question; the answer uses only this notebook's sources.
     Ask {
         notebook: String,
@@ -89,16 +91,14 @@ fn main() -> Result<()> {
         Box::new(CodexExec::default()),
     );
     match cli.command {
-        Command::Add { notebook, file } => {
+        Command::Add { notebook, location } => {
             let id = notebooks.notebook(&notebook)?;
-            let text = std::fs::read_to_string(&file)
-                .with_context(|| format!("cannot read {}", file.display()))?;
-            let title = file
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| file.display().to_string());
-            let count = notebooks.add_source(id, &title, &text)?;
-            println!("«{title}» добавлен в «{notebook}»: {count} фрагментов.");
+            let document = Sources::standard().read(&location)?;
+            let count = notebooks.add_source(id, &document.title, &document.text)?;
+            println!(
+                "«{}» добавлен в «{notebook}»: {count} фрагментов.",
+                document.title
+            );
         }
         Command::Ask {
             notebook,
