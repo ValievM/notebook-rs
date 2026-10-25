@@ -2,6 +2,8 @@ pub mod answer;
 pub mod chunk;
 pub mod domain;
 pub mod embed;
+#[cfg(feature = "fastembed")]
+pub mod embed_fast;
 pub mod error;
 pub mod llm;
 pub mod retrieve;

@@ -21,7 +21,8 @@ chunk::Chunker     embed::Embedder          retrieve::Retriever ──► answer
 | `domain` | Слова предметной области: `NotebookId`, `PassageId` (newtype), `Passage`. |
 | `error` | Единый `Error` (thiserror). `anyhow` только в `main.rs`. |
 | `chunk` | Трейт `Chunker`, `ParagraphChunker`. Режет источник на фрагменты. |
-| `embed` | Трейт `Embedder`, `HashingEmbedder` (офлайн), `cosine`. Вектор помечен именем модели. |
+| `embed` | Трейт `Embedder` (`embed` для фрагментов, `embed_query` для вопроса), `HashingEmbedder` (офлайн), `cosine`. Вектор помечен именем модели. |
+| `embed_fast` | `FastEmbedder` (fastembed, E5), только с `--features fastembed`. |
 | `store` | Репозиторий над SQLite: FTS5 (BM25) и векторы (BLOB). Единственное место с SQL, миграции через `user_version`. |
 | `retrieve` | Трейт `Retriever`; `Bm25Retriever`, `VectorRetriever`, `HybridRetriever` + `reciprocal_rank_fusion`. |
 | `answer` | Промпт с пронумерованными фрагментами, разбор JSON, проверка цитат подстрокой. |

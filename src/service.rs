@@ -4,7 +4,7 @@
 use crate::answer::{self, Answer};
 use crate::chunk::{Chunker, ParagraphChunker};
 use crate::domain::NotebookId;
-use crate::embed::{Embedder, HashingEmbedder};
+use crate::embed::Embedder;
 use crate::error::Result;
 use crate::llm::Llm;
 use crate::retrieve::{Bm25Retriever, HybridRetriever, Retriever, VectorRetriever};
@@ -39,9 +39,8 @@ impl Notebooks {
     }
 
     /// The usual wiring: paragraph chunks, offline embeddings, BM25 and vectors fused.
-    pub fn standard(store: Store, llm: Box<dyn Llm>) -> Self {
+    pub fn standard(store: Store, embedder: Arc<dyn Embedder>, llm: Box<dyn Llm>) -> Self {
         let store = Arc::new(store);
-        let embedder: Arc<dyn Embedder> = Arc::new(HashingEmbedder::default());
         let retriever = HybridRetriever::new(vec![
             Box::new(Bm25Retriever::new(store.clone())),
             Box::new(VectorRetriever::new(store.clone(), embedder.clone())),
@@ -88,6 +87,7 @@ impl Notebooks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embed::HashingEmbedder;
     use std::sync::Mutex;
 
     /// Remembers the prompt it was given and answers with a fixed reply.
@@ -109,7 +109,11 @@ mod tests {
             reply: r#"{"answer":"Два года [1].","citations":[{"n":1,"quote":"два года"},{"n":1,"quote":"выдумка"}]}"#,
             prompts: prompts.clone(),
         };
-        let notebooks = Notebooks::standard(Store::in_memory().unwrap(), Box::new(llm));
+        let notebooks = Notebooks::standard(
+            Store::in_memory().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            Box::new(llm),
+        );
         let nb = notebooks.notebook("Диплом").unwrap();
         notebooks
             .add_source(

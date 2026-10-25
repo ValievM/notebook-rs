@@ -6,7 +6,14 @@ use crate::error::Result;
 pub trait Embedder: Send + Sync {
     /// Names the model. Vectors made by different models are never compared.
     fn model(&self) -> &str;
+    /// Vectors for passages that are being stored.
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+
+    /// The vector of a question. Some models (E5) want questions and passages marked
+    /// differently; the default treats them the same.
+    fn embed_query(&self, question: &str) -> Result<Vec<f32>> {
+        Ok(self.embed(&[question.to_string()])?.remove(0))
+    }
 }
 
 /// Offline and instant: words (cut a little, like the search does) hashed into a fixed number of
@@ -56,7 +63,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
-fn normalize(vector: &mut [f32]) {
+/// Scales a vector to unit length, so that cosine similarity is a plain dot product.
+pub fn normalize(vector: &mut [f32]) {
     let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
         vector.iter_mut().for_each(|x| *x /= norm);

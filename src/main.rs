@@ -1,7 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use notebook_rs::{llm::CodexExec, service::Notebooks, store::Store};
+use notebook_rs::{
+    embed::{Embedder, HashingEmbedder},
+    llm::CodexExec,
+    service::Notebooks,
+    store::Store,
+};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -12,8 +18,42 @@ struct Cli {
     /// Where the notebooks live (default: ~/.notebook-rs/notebooks.db).
     #[arg(long, global = true)]
     db: Option<PathBuf>,
+    /// How passages and questions become vectors. Vectors of one kind are never mixed with
+    /// another: after switching, add the sources again.
+    #[arg(long, global = true, value_enum, default_value_t = EmbedderKind::default_kind())]
+    embedder: EmbedderKind,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum EmbedderKind {
+    /// Offline word hashing: instant, no download, no synonyms.
+    Hashing,
+    /// Multilingual E5 model on this machine (built with `--features fastembed`).
+    #[cfg(feature = "fastembed")]
+    Fastembed,
+}
+
+impl EmbedderKind {
+    fn default_kind() -> Self {
+        #[cfg(feature = "fastembed")]
+        return Self::Fastembed;
+        #[cfg(not(feature = "fastembed"))]
+        Self::Hashing
+    }
+}
+
+#[cfg_attr(not(feature = "fastembed"), allow(unused_variables))]
+fn embedder(kind: EmbedderKind, db_path: &std::path::Path) -> Result<Arc<dyn Embedder>> {
+    match kind {
+        EmbedderKind::Hashing => Ok(Arc::new(HashingEmbedder::default())),
+        #[cfg(feature = "fastembed")]
+        EmbedderKind::Fastembed => {
+            let cache = db_path.with_file_name("models");
+            Ok(Arc::new(notebook_rs::embed_fast::FastEmbedder::new(cache)?))
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -35,7 +75,12 @@ fn main() -> Result<()> {
             directory.join("notebooks.db")
         }
     };
-    let notebooks = Notebooks::standard(Store::open(&path)?, Box::new(CodexExec::default()));
+    let embedder = embedder(cli.embedder, &path)?;
+    let notebooks = Notebooks::standard(
+        Store::open(&path)?,
+        embedder,
+        Box::new(CodexExec::default()),
+    );
     match cli.command {
         Command::Add { notebook, file } => {
             let id = notebooks.notebook(&notebook)?;

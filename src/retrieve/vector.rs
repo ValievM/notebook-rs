@@ -20,7 +20,7 @@ impl VectorRetriever {
 
 impl Retriever for VectorRetriever {
     fn retrieve(&self, notebook: NotebookId, question: &str, limit: usize) -> Result<Vec<Passage>> {
-        let query = self.embedder.embed(&[question.to_string()])?.remove(0);
+        let query = self.embedder.embed_query(question)?;
         let mut scored: Vec<(f32, Passage)> = self
             .store
             .embedded_passages(notebook, self.embedder.model())?
