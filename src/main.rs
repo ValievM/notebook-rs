@@ -81,6 +81,13 @@ enum Command {
     /// Add a source: a text or Markdown file, a PDF file, a web address (http/https), or a
     /// folder (every such file in it and its subfolders). The same title replaces the old source.
     Add { notebook: String, location: String },
+    /// A mind map of one source (`--source <title>`) or of the whole notebook, as an outline
+    /// (the window draws it)
+    Mindmap {
+        notebook: String,
+        #[arg(long)]
+        source: Option<String>,
+    },
     /// Cut the sources of a notebook again and embed them again (after the way of cutting or
     /// the embedding model changed)
     Reindex { notebook: String },
@@ -211,6 +218,17 @@ fn main() -> Result<()> {
                 anyhow::bail!("не добавлено файлов: {}", report.failed.len());
             }
         }
+        Command::Mindmap { notebook, source } => {
+            let id = notebooks.notebook(&notebook)?;
+            let map = notebooks.mind_map(id, source.as_deref())?;
+            print_node(&map.root, 0);
+            if map.rejected_quotes > 0 {
+                println!(
+                    "\n(цитат узлов, которых нет в источниках, отброшено: {})",
+                    map.rejected_quotes
+                );
+            }
+        }
         Command::Reindex { notebook } => {
             let id = notebooks.notebook(&notebook)?;
             let report = notebooks.reindex(id)?;
@@ -260,6 +278,17 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn print_node(node: &notebook_rs::mindmap::Node, depth: usize) {
+    let mark = node
+        .cite
+        .as_ref()
+        .map_or(String::new(), |c| format!("  [{}] {}", c.n, c.source_title));
+    println!("{}{}{mark}", "  ".repeat(depth), node.title);
+    for child in &node.children {
+        print_node(child, depth + 1);
+    }
 }
 
 /// The answer, then the citations that were found in the sources, then how many were not.

@@ -3,6 +3,8 @@
 // Everything that comes from sources or from the model is untrusted text (web pages and PDFs
 // can say anything). It is only ever put into the page as text nodes, never as HTML.
 
+import { renderMindMap } from './mindmap.js';
+
 const api = await loadApi();
 
 async function loadApi() {
@@ -81,7 +83,7 @@ function banner(message, kind = 'info') {
 function working(delta) {
   state.working += delta;
   const busy = state.working > 0 || !state.ready;
-  for (const id of ['send', 'summarize', 'compare', 'pick-files', 'pick-folder']) $(id).disabled = busy;
+  for (const id of ['send', 'summarize', 'compare', 'mindmap', 'pick-files', 'pick-folder']) $(id).disabled = busy;
   if (!busy) renderSelection();
 }
 
@@ -134,6 +136,7 @@ async function loadHistory(id) {
     for (const entry of entries) {
       addMessage(entry.user
         ? h('div', { class: 'message user' }, entry.text)
+        : entry.mindMap ? mapCard(entry.mindMap)
         : answerMessage(ANSWER_KINDS[entry.kind] ?? 'Ответ', entry));
     }
   } catch (error) { toast(String(error), 'error'); }
@@ -255,6 +258,8 @@ function renderSelection() {
   $('summarize').textContent = count === 1 ? 'Конспект источника' : 'Конспект блокнота';
   $('summarize').disabled = busy || !hasNotebook || count > 1;
   $('compare').disabled = busy || count !== 2;
+  $('mindmap').disabled = busy || !hasNotebook || count > 1;
+  $('mindmap').textContent = count === 1 ? 'Карта источника' : 'Ментальная карта';
   $('selection-hint').textContent =
     count === 0 ? 'Отметьте источники галочками: один для конспекта, два для сравнения.'
     : count === 1 ? 'Выбран один источник: конспект только по нему.'
@@ -371,7 +376,7 @@ function addMessage(node) {
 }
 
 /** Runs one request to the model and puts its answer (or its error) into the dialog. */
-async function runTask(kind, waiting, command, args) {
+async function runTask(kind, waiting, command, args, render = (answer) => answerMessage(kind, answer)) {
   const pending = addMessage(h('div', { class: 'message pending' }, waiting));
   // A long answer (a summary of a big notebook takes minutes) must not look like a hang.
   const startedAt = Date.now();
@@ -382,7 +387,7 @@ async function runTask(kind, waiting, command, args) {
   working(1);
   try {
     const answer = await api.invoke(command, { notebookId: state.current, ...args });
-    pending.replaceWith(answerMessage(kind, answer));
+    pending.replaceWith(render(answer));
   } catch (error) {
     pending.replaceWith(h('div', { class: 'message error' }, String(error)));
   } finally {
@@ -412,6 +417,39 @@ $('summarize').addEventListener('click', async () => {
   const label = source ? `Конспект «${source}»` : 'Конспект блокнота';
   addMessage(h('div', { class: 'message user' }, label));
   await runTask('Конспект', 'Составляю конспект…', 'summarize', { source: source ?? null });
+});
+
+// ---------- mind map ----------
+
+/** The card in the dialog: the map itself is big, so it opens in its own panel. */
+function mapCard(map) {
+  return h('div', { class: 'message assistant' },
+    h('div', { class: 'kind' }, 'Ментальная карта'),
+    h('div', { class: 'map-card' },
+      h('span', {}, `${map.root.title} · узлов: ${map.nodes}`),
+      h('button', { type: 'button', onclick: () => openMap(map) }, 'Открыть')));
+}
+
+function openMap(map) {
+  closeViewer();
+  closeMetrics();
+  closeSettings();
+  $('map-title').textContent = `Ментальная карта: ${map.root.title}`;
+  $('map-note').textContent = map.rejectedQuotes > 0
+    ? `У ${map.rejectedQuotes} узлов цитаты не нашлись в источниках: ссылки на них убраны. Узлы с жирной рамкой открывают место в источнике.`
+    : 'Узлы с жирной рамкой открывают место в источнике. Кружок справа сворачивает ветку.';
+  renderMindMap($('map-body'), map, { onCite: (citation) => { closeMap(); openCitation(citation); } });
+  $('map-view').hidden = false;
+}
+
+function closeMap() { $('map-view').hidden = true; }
+$('map-close').addEventListener('click', closeMap);
+
+$('mindmap').addEventListener('click', async () => {
+  const [source] = [...state.selected];
+  addMessage(h('div', { class: 'message user' }, source ? `Ментальная карта «${source}»` : 'Ментальная карта блокнота'));
+  await runTask('Ментальная карта', 'Строю карту…', 'mind_map', { source: source ?? null },
+    (map) => { openMap(map); return mapCard(map); });
 });
 
 $('compare').addEventListener('click', async () => {
@@ -501,7 +539,7 @@ async function openSource(title, ordinal = null, quote = null) {
 function closeViewer() { $('viewer').hidden = true; }
 $('viewer-close').addEventListener('click', closeViewer);
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') { closeViewer(); closeMetrics(); closeSettings(); closeNotebookMenu(); }
+  if (event.key === 'Escape') { closeViewer(); closeMetrics(); closeSettings(); closeNotebookMenu(); closeMap(); }
 });
 
 // ---------- who answers ----------
@@ -645,6 +683,9 @@ const KIND_LABELS = {
   ask_deep: 'глубокий вопрос',
   summarize: 'конспект',
   compare: 'сравнение',
+  mindmap: 'ментальная карта',
+  reindex: 'переиндексация',
+  'command.mindmap': 'окно: ментальная карта',
   'llm.complete': 'вызов модели',
   'embed.query': 'вектор вопроса',
   'embed.passages': 'векторы фрагментов',

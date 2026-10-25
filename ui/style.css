@@ -263,6 +263,18 @@ body { display: flex; flex-direction: column; }
 .composer-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .check { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 
+/* Mind map */
+.mindmap-view { width: min(1100px, 96vw); }
+.mindmap-body { flex: 1; overflow: auto; padding: 8px 16px 24px; }
+.mindmap-tools { display: flex; gap: 6px; margin-bottom: 8px; }
+.mindmap-canvas svg { display: block; }
+.mm-node text { pointer-events: none; }
+.mm-node.has-cite { cursor: pointer; }
+.mm-node.has-cite:hover rect { fill: var(--accent-soft); }
+.mm-toggle { cursor: pointer; }
+.map-note { padding: 6px 16px 0; margin: 0; }
+.map-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
 /* Source viewer */
 .viewer {
   position: fixed;

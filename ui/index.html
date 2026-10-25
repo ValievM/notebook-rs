@@ -65,6 +65,7 @@
       <h2>Студия</h2>
       <button id="summarize" type="button" class="tile">Конспект</button>
       <button id="compare" type="button" class="tile">Сравнить</button>
+      <button id="mindmap" type="button" class="tile">Ментальная карта</button>
       <p id="selection-hint" class="hint"></p>
     </aside>
 
@@ -76,6 +77,15 @@
       <div id="viewer-body" class="viewer-body"></div>
     </aside>
   </div>
+
+  <aside id="map-view" class="viewer wide mindmap-view" hidden aria-label="Ментальная карта">
+    <header>
+      <h2 id="map-title">Ментальная карта</h2>
+      <button id="map-close" type="button" class="icon" aria-label="Закрыть карту">×</button>
+    </header>
+    <p id="map-note" class="hint map-note"></p>
+    <div id="map-body" class="mindmap-body"></div>
+  </aside>
 
   <aside id="settings" class="viewer" hidden aria-label="Настройки">
     <header>

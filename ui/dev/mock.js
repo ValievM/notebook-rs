@@ -96,6 +96,30 @@ export const api = {
       }
       case 'history': return structuredClone(data.history[args.notebookId] ?? []);
       case 'clear_history': data.history[args.notebookId] = []; return null;
+      case 'mind_map': {
+        const cite = (n, quote) => ({ n, sourceTitle: 'договор.md', ordinal: n - 1, quote });
+        const map = {
+          rejectedQuotes: 0,
+          nodes: 14,
+          root: { title: args.source ?? 'Аренда', cite: null, children: [
+            { title: 'Срок и продление', cite: null, children: [
+              { title: 'Два года с подписания', cite: cite(1, 'Срок действия договора составляет два года'), children: [] },
+              { title: 'Продление по соглашению сторон за 30 дней до конца срока', cite: null, children: [] }] },
+            { title: 'Оплата', cite: null, children: [
+              { title: 'Ежемесячно до 10 числа', cite: cite(2, 'вносится ежемесячно до десятого числа'), children: [] },
+              { title: 'Штрафы за просрочку', cite: null, children: [] }] },
+            { title: 'Выезд', cite: null, children: [
+              { title: 'Предупредить за тридцать дней', cite: cite(1, 'освободить помещение за тридцать дней'), children: [] },
+              { title: 'Акт приёма-передачи', cite: null, children: [] }] },
+            { title: 'Ответственность сторон', cite: null, children: [
+              { title: 'Ремонт', cite: null, children: [] }, { title: 'Коммунальные платежи', cite: null, children: [] }] },
+          ] },
+        };
+        const list = (data.history[args.notebookId] ??= []);
+        list.push({ id: list.length + 1, user: true, kind: 'mindmap', text: 'Ментальная карта', citations: [], rejectedQuotes: 0 });
+        list.push({ id: list.length + 1, user: false, kind: 'mindmap', text: map.root.title, citations: [], rejectedQuotes: 0, mindMap: map });
+        return map;
+      }
       case 'ask': {
         const list = (data.history[args.notebookId] ??= []);
         list.push({ id: list.length + 1, user: true, kind: 'ask', text: args.question, citations: [], rejectedQuotes: 0 });
